@@ -7,22 +7,34 @@ import streamlit as st
 from config.settings import AppSettings
 
 
+_PAGES = {
+    "terminal":  ("🖥",  "Trading Terminal"),
+    "positions": ("📈",  "Positions & P&L"),
+    "exposure":  ("⚖️",  "Exposure & Risk"),
+    "account":   ("👤",  "Account View"),
+    "holdings":  ("📁",  "Holdings"),
+}
+
+
 def render_sidebar(settings: AppSettings, account_ids: List[str]) -> Tuple[str, Optional[str]]:
     """
-    Render the sidebar navigation and filters.
+    Render the sidebar navigation.
 
     Returns:
-        (view, selected_account_id)
-        view: "combined" | "account" | "holdings" | "positions" | "exposure"
+        (view_key, selected_account_id)
+        view_key: one of "terminal" | "positions" | "exposure" | "account" | "holdings"
     """
     with st.sidebar:
+        # Logo / brand
         st.markdown(
             """
-            <div style="padding: 12px 0 8px 0; text-align:center;">
-                <div style="font-size:1.5rem;">📊</div>
-                <div style="font-weight:700; font-size:1rem; color:#e6edf3;">TradeView</div>
-                <div style="font-size:0.72rem; color:#6e7681; margin-top:2px;">
-                    Read-only Portfolio Monitor
+            <div style="padding:12px 0 4px 0; text-align:center;">
+                <div style="font-size:1.6rem; line-height:1;">📊</div>
+                <div style="font-weight:700; font-size:1rem; color:#e6edf3; margin-top:4px;">
+                    TradeView
+                </div>
+                <div style="font-size:0.68rem; color:#6e7681; margin-top:2px;">
+                    Multi-account Terminal
                 </div>
             </div>
             """,
@@ -30,86 +42,111 @@ def render_sidebar(settings: AppSettings, account_ids: List[str]) -> Tuple[str, 
         )
         st.divider()
 
-        # Navigation
+        # ── Navigation ────────────────────────────────────────────────
         st.markdown(
-            "<div style='font-size:0.72rem; color:#6e7681; font-weight:600; "
-            "text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px;'>Navigation</div>",
+            "<div style='font-size:0.68rem; color:#6e7681; font-weight:600; "
+            "text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;'>"
+            "Navigation</div>",
             unsafe_allow_html=True,
         )
 
-        pages = {
-            "🏠  Combined Dashboard": "combined",
-            "👤  Account View": "account",
-            "📁  Holdings": "holdings",
-            "📈  Positions & P&L": "positions",
-            "⚖️  Exposure & Risk": "exposure",
-        }
-
         if "active_page" not in st.session_state:
-            st.session_state.active_page = "combined"
+            st.session_state.active_page = "terminal"
 
-        for label, page_key in pages.items():
-            is_active = st.session_state.active_page == page_key
+        for key, (icon, label) in _PAGES.items():
+            is_active = st.session_state.active_page == key
             btn_style = (
-                "background:#1f4287; color:#58a6ff; font-weight:600;"
-                if is_active
-                else "background:transparent; color:#c9d1d9;"
-            )
+                "background-color:#1f4287 !important; color:#58a6ff !important;"
+            ) if is_active else ""
+
             if st.button(
-                label,
-                key=f"nav_{page_key}",
+                f"{icon}  {label}",
+                key=f"nav_{key}",
                 use_container_width=True,
-                help=None,
             ):
-                st.session_state.active_page = page_key
+                st.session_state.active_page = key
                 st.rerun()
 
         st.divider()
 
-        # Account filter (shown when not on combined view)
-        selected_account: Optional[str] = None
+        # ── Account / Broker filter ───────────────────────────────────
         view = st.session_state.active_page
+        selected_account: Optional[str] = None
 
-        if view in ("account", "holdings", "positions", "exposure") and account_ids:
+        if account_ids:
+            cfg_map = {a.account_id: a for a in settings.accounts}
+
+            if view in ("positions", "exposure", "holdings", "account"):
+                st.markdown(
+                    "<div style='font-size:0.68rem; color:#6e7681; font-weight:600; "
+                    "text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;'>"
+                    "Filter by Account</div>",
+                    unsafe_allow_html=True,
+                )
+                display_names = {
+                    aid: (cfg_map[aid].display_name if aid in cfg_map else aid)
+                    for aid in account_ids
+                }
+                options = ["All Accounts"] + account_ids
+                labels = ["All Accounts"] + [display_names[a] for a in account_ids]
+
+                sel_label = st.selectbox(
+                    "Account",
+                    labels,
+                    key="account_selector",
+                    label_visibility="collapsed",
+                )
+                if sel_label != "All Accounts":
+                    idx = labels.index(sel_label)
+                    selected_account = options[idx]
+
+            # ── Accounts quick-info ───────────────────────────────────
             st.markdown(
-                "<div style='font-size:0.72rem; color:#6e7681; font-weight:600; "
-                "text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px;'>Account</div>",
+                "<div style='font-size:0.68rem; color:#6e7681; font-weight:600; "
+                "text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;'>"
+                "Active Accounts</div>",
                 unsafe_allow_html=True,
             )
-            account_options = ["All Accounts"] + account_ids
-            sel = st.selectbox(
-                "Select Account",
-                options=account_options,
-                key="account_selector",
-                label_visibility="collapsed",
-            )
-            selected_account = None if sel == "All Accounts" else sel
+            for aid in account_ids:
+                cfg = cfg_map.get(aid)
+                broker = cfg.metadata.get("original_broker", "").capitalize() if cfg else ""
+                name = cfg.display_name if cfg else aid
+                st.markdown(
+                    f"""
+                    <div style="display:flex; justify-content:space-between; align-items:center;
+                                padding:5px 8px; border-radius:5px; margin-bottom:3px;
+                                background:#21262d;">
+                        <span style="font-size:0.73rem; color:#c9d1d9;">{name}</span>
+                        <span style="font-size:0.62rem; color:#6e7681; background:#30363d;
+                                     padding:1px 6px; border-radius:8px;">{broker}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
         st.divider()
 
-        # Mode indicator
-        mode_label = "🟢 LIVE MODE" if settings.app_mode == "live" else "🔵 DEMO MODE"
-        st.markdown(
-            f"<div style='font-size:0.75rem; color:#6e7681; text-align:center;'>{mode_label}</div>",
-            unsafe_allow_html=True,
-        )
-
-        broker_labels = {
-            "zerodha_primary": "Zerodha Primary",
-            "zerodha_trading": "Zerodha Trading",
-            "groww_invest": "Groww",
-        }
-        acct_lines = " · ".join(broker_labels.get(a, a) for a in account_ids)
-        if acct_lines:
+        # ── Mode indicator ────────────────────────────────────────────
+        if settings.app_mode == "live":
             st.markdown(
-                f"<div style='font-size:0.7rem; color:#6e7681; text-align:center; margin-top:4px;'>"
-                f"{acct_lines}</div>",
+                "<div style='text-align:center;'>"
+                "<span style='background:#238636; color:#fff; font-size:0.7rem; font-weight:700;"
+                "padding:3px 10px; border-radius:10px; letter-spacing:0.08em;'>● LIVE</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='text-align:center;'>"
+                "<span style='background:#6e7681; color:#fff; font-size:0.7rem; font-weight:700;"
+                "padding:3px 10px; border-radius:10px; letter-spacing:0.08em;'>◎ DEMO MODE</span>"
+                "</div>",
                 unsafe_allow_html=True,
             )
 
         st.markdown(
-            "<div style='font-size:0.68rem; color:#30363d; text-align:center; margin-top:24px;'>"
-            "Read-only · No order execution"
+            "<div style='font-size:0.62rem; color:#30363d; text-align:center; margin-top:12px;'>"
+            "Read-only &nbsp;&middot;&nbsp; No order execution"
             "</div>",
             unsafe_allow_html=True,
         )

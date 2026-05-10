@@ -10,6 +10,54 @@ html, body, [class*="css"] {
     font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
 }
 
+/* ── Terminal number style ───────────────────────────────── */
+.terminal-num {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+}
+
+/* ── Expander (for grouped positions view) ───────────────── */
+.streamlit-expanderHeader {
+    background-color: #161b22 !important;
+    color: #c9d1d9 !important;
+    border: 1px solid #30363d !important;
+    border-radius: 6px !important;
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+}
+.streamlit-expanderHeader:hover {
+    border-color: #58a6ff !important;
+    color: #58a6ff !important;
+}
+.streamlit-expanderContent {
+    border: 1px solid #21262d !important;
+    border-top: none !important;
+    border-radius: 0 0 6px 6px !important;
+    background: #0d1117 !important;
+}
+
+/* ── Radio pills (view toggle) ───────────────────────────── */
+div[data-testid="stRadio"] > div {
+    flex-direction: row;
+    gap: 6px;
+}
+div[data-testid="stRadio"] label {
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 20px;
+    padding: 3px 14px;
+    font-size: 0.78rem;
+    color: #8b949e;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+div[data-testid="stRadio"] label:has(input:checked) {
+    background: #1f4287;
+    border-color: #58a6ff;
+    color: #58a6ff;
+    font-weight: 600;
+}
+
 /* ── App background ──────────────────────────────────────── */
 .stApp {
     background-color: #0d1117;

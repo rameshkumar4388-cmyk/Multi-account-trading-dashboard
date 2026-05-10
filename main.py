@@ -103,9 +103,9 @@ def main():
     render_header(settings.app_mode, net_worth, day_pnl)
 
     # ── Page routing ──────────────────────────────────────────────────
-    if view == "combined":
+    if view == "terminal":
         from ui.pages.combined_dashboard import render
-        render(aggregation_svc)
+        render(aggregation_svc, md_svc)
 
     elif view == "account":
         from ui.pages.account_dashboard import render
