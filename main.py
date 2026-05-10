@@ -7,19 +7,22 @@ Architecture:
   Streamlit reruns this script on every interaction/autorefresh.
   Services are cached with @st.cache_resource so they persist across reruns
   (single instance per server process, shared by all sessions).
-  The MockFeed background thread runs continuously inside MarketDataManager.
+
+OAuth redirect handling:
+  Zerodha redirects to this URL after login:
+    http://<host>:8501?request_token=<token>&action=login&status=success
+  main() detects this on every render and auto-exchanges the token
+  before routing to any page.
 """
 from __future__ import annotations
 
 import sys
 import os
 
-# Ensure repo root is on sys.path so all imports resolve correctly
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
 
-# ── Page config must be first Streamlit call ──────────────────────────
 st.set_page_config(
     page_title="Portfolio Dashboard",
     page_icon="📊",
@@ -32,7 +35,6 @@ st.set_page_config(
     },
 )
 
-# ── Deferred imports (after sys.path setup) ───────────────────────────
 from config.settings import load_settings
 from services.account_service import AccountService
 from services.aggregation_service import AggregationService
@@ -43,7 +45,7 @@ from ui.components.header import render_header
 from ui.components.sidebar import render_sidebar
 
 
-# ── Singleton services (survive Streamlit reruns) ─────────────────────
+# ── Singleton services ────────────────────────────────────────────────
 
 @st.cache_resource
 def _get_settings():
@@ -51,8 +53,14 @@ def _get_settings():
 
 
 @st.cache_resource
-def _get_account_service(_settings):
-    svc = AccountService(_settings)
+def _get_database(_settings):
+    from database.db import Database
+    return Database(_settings.db_path)
+
+
+@st.cache_resource
+def _get_account_service(_settings, _db):
+    svc = AccountService(_settings, db=_db)
     svc.initialize()
     return svc
 
@@ -62,7 +70,6 @@ def _get_market_data_service(_settings, _account_svc):
     svc = MarketDataService(_settings)
     symbols = _account_svc.get_all_symbols()
     svc.initialize(symbols)
-    # In live mode, attach Zerodha polling feed so prices update every N seconds
     if _settings.app_mode == "live":
         sessions = _account_svc.get_kite_sessions()
         svc.attach_zerodha_feed(sessions, symbols)
@@ -84,26 +91,45 @@ def _get_aggregation_service(_account_svc, _portfolio_svc):
 def main():
     apply_theme()
 
-    settings = _get_settings()
-    account_svc = _get_account_service(settings)
-    md_svc = _get_market_data_service(settings, account_svc)
-    portfolio_svc = _get_portfolio_service(account_svc, md_svc)
-    aggregation_svc = _get_aggregation_service(account_svc, portfolio_svc)
+    settings     = _get_settings()
+    db           = _get_database(settings)
+    account_svc  = _get_account_service(settings, db)
+    md_svc       = _get_market_data_service(settings, account_svc)
+    portfolio_svc    = _get_portfolio_service(account_svc, md_svc)
+    aggregation_svc  = _get_aggregation_service(account_svc, portfolio_svc)
 
-    account_ids     = account_svc.list_account_ids()
-    account_health  = account_svc.get_health()
+    # ── OAuth redirect handling (runs before sidebar / page routing) ──
+    # When Zerodha redirects back after login, st.query_params contains
+    # request_token, action, status. We handle it here on EVERY rerun
+    # so the token is captured even if the user lands on a different page.
+    if settings.app_mode == "live":
+        params = st.query_params
+        if params.get("status") == "success" and params.get("request_token"):
+            from ui.pages.auth_page import handle_oauth_redirect
+            processed = handle_oauth_redirect(account_svc, settings)
+            if processed:
+                # Invalidate portfolio cache for the refreshed account
+                target = st.session_state.get("auth_target_account")
+                if target:
+                    portfolio_svc.invalidate(target)
+                # Clear URL params to avoid re-processing on next render
+                st.query_params.clear()
+                st.rerun()
 
-    # ── Sidebar navigation ────────────────────────────────────────────
+    # ── Navigation ────────────────────────────────────────────────────
+    account_ids    = account_svc.list_account_ids()
+    account_health = account_svc.get_health()
+
     view, selected_account = render_sidebar(settings, account_ids, account_health)
 
-    # ── Combined metrics for header ───────────────────────────────────
+    # ── Header ────────────────────────────────────────────────────────
     try:
-        metrics = aggregation_svc.get_combined_metrics()
+        metrics   = aggregation_svc.get_combined_metrics()
         net_worth = metrics.get("net_worth", 0.0)
-        day_pnl = metrics.get("day_pnl", 0.0)
+        day_pnl   = metrics.get("day_pnl", 0.0)
     except Exception:
         net_worth = 0.0
-        day_pnl = 0.0
+        day_pnl   = 0.0
 
     render_header(settings.app_mode, net_worth, day_pnl)
 
@@ -128,6 +154,10 @@ def main():
         from ui.pages.exposure_page import render
         render(aggregation_svc, portfolio_svc, selected_account)
 
+    elif view == "auth":
+        from ui.pages.auth_page import render
+        render(account_svc, settings, portfolio_svc)
+
     # ── Auto-refresh ──────────────────────────────────────────────────
     try:
         from streamlit_autorefresh import st_autorefresh
@@ -137,15 +167,10 @@ def main():
             key="dashboard_autorefresh",
         )
     except ImportError:
-        # Fallback: manual refresh button in sidebar
         with st.sidebar:
             st.divider()
             if st.button("🔄 Refresh", use_container_width=True):
                 st.rerun()
-            st.caption(
-                "Install streamlit-autorefresh for auto-refresh:\n"
-                "`pip install streamlit-autorefresh`"
-            )
 
 
 if __name__ == "__main__":

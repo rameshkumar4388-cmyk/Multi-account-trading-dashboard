@@ -1,0 +1,279 @@
+"""
+Authentication management page.
+
+Flow for daily Zerodha token refresh:
+  1. User clicks "Open Kite Login" — opens kite.zerodha.com in a new tab
+  2. User logs in and gets redirected back to this dashboard URL:
+       http://<vps>:8501?request_token=<token>&action=login&status=success
+  3. Streamlit reads request_token from st.query_params automatically
+  4. Dashboard exchanges request_token → access_token using api_secret from .env
+  5. New access_token is stored in SQLite and the live session is refreshed
+  6. No manual .env editing or app restart required
+
+Security:
+  - api_secret never leaves the server (.env → python process only)
+  - access_token is stored server-side in SQLite (never in browser)
+  - request_token is single-use and immediately consumed
+"""
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+import streamlit as st
+
+logger = logging.getLogger(__name__)
+
+
+def _exchange_token(api_key: str, api_secret: str, request_token: str) -> Optional[str]:
+    """Exchange request_token for access_token. Returns access_token or None."""
+    try:
+        from kiteconnect import KiteConnect
+        kite = KiteConnect(api_key=api_key)
+        session = kite.generate_session(request_token, api_secret=api_secret)
+        return session.get("access_token")
+    except Exception as exc:
+        logger.error("Token exchange failed: %s", exc)
+        return None
+
+
+def handle_oauth_redirect(account_svc, settings) -> bool:
+    """
+    Check URL query params for a Zerodha OAuth redirect.
+    If request_token is present and valid, exchange and refresh the session.
+
+    Returns True if a token was successfully processed (caller should clear params).
+    """
+    params = st.query_params
+    request_token = params.get("request_token", "")
+    action        = params.get("action", "")
+    status        = params.get("status", "")
+
+    if not request_token or status != "success":
+        return False
+
+    # Find the account whose api_key matches what we configured
+    # (In multi-account setups, we match by account_id stored in session state)
+    target_account = st.session_state.get("auth_target_account")
+
+    if not target_account:
+        # Single-account: pick the first live Zerodha account
+        all_ids = list(account_svc._account_configs.keys())
+        zerodha_ids = [
+            aid for aid in all_ids
+            if account_svc._account_configs[aid].broker == "zerodha"
+        ]
+        target_account = zerodha_ids[0] if zerodha_ids else None
+
+    if not target_account:
+        st.error("No Zerodha account configured to receive this token.")
+        return False
+
+    cfg = account_svc._account_configs.get(target_account)
+    if not cfg:
+        return False
+
+    api_key    = cfg.credentials.get("api_key", "")
+    api_secret = settings.accounts[0].credentials.get("api_secret", "") if settings.accounts else ""
+
+    # Prefer per-account secret
+    api_secret = cfg.credentials.get("api_secret", api_secret)
+
+    if not api_secret:
+        st.error(
+            f"api_secret not configured for account '{target_account}'. "
+            "Set KITE_API_SECRET (or ZERODHA_{TAG}_API_SECRET) in .env."
+        )
+        return False
+
+    with st.spinner("Exchanging request token for access token…"):
+        access_token = _exchange_token(api_key, api_secret, request_token)
+
+    if not access_token:
+        st.error(
+            "Token exchange failed. The request_token may have expired "
+            "(it's single-use and valid for ~5 minutes). Please try logging in again."
+        )
+        return False
+
+    # Refresh the live session in-place (no restart needed)
+    ok = account_svc.refresh_session(
+        account_id=target_account,
+        access_token=access_token,
+    )
+
+    if ok:
+        st.session_state["last_auth_success"] = target_account
+        st.success(
+            f"✓ Connected {cfg.display_name}. "
+            "Token stored — will persist across app restarts until 6 AM IST tomorrow."
+        )
+        logger.info(
+            "OAuth redirect: successfully refreshed session for '%s'", target_account
+        )
+        return True
+    else:
+        health = account_svc.get_health().get(target_account)
+        err = health.error if health else "Unknown error"
+        st.error(f"Session refresh failed after token exchange: {err}")
+        return False
+
+
+def render(account_svc, settings, portfolio_svc=None):
+    """Auth management page — shown when user navigates to Auth or on token expiry."""
+
+    health = account_svc.get_health()
+    all_account_ids = list(account_svc._account_configs.keys())
+
+    st.markdown(
+        "<div style='font-size:1.1rem;font-weight:700;color:#e6edf3;margin-bottom:4px;'>"
+        "Zerodha Authentication</div>"
+        "<div style='font-size:0.8rem;color:#8b949e;margin-bottom:20px;'>"
+        "Tokens expire daily at 6 AM IST. Use this page to reconnect without restarting the app."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Per-account status cards ──────────────────────────────────────
+    for account_id in all_account_ids:
+        cfg = account_svc._account_configs.get(account_id)
+        if not cfg or cfg.broker != "zerodha":
+            continue
+
+        h = health.get(account_id)
+        is_active = h.is_active if h else False
+        auth_time = (
+            h.authenticated_at.strftime("%d %b %Y %H:%M") if (h and h.authenticated_at) else "—"
+        )
+        status_color = "#3fb950" if is_active else "#f85149"
+        status_text  = "Connected" if is_active else (h.status.replace("_", " ").title() if h else "Unknown")
+        error_text   = f"<div style='font-size:0.72rem;color:#f85149;margin-top:4px;'>{h.error}</div>" if (h and h.error) else ""
+
+        st.markdown(
+            f"<div style='background:#161b22;border:1px solid #30363d;border-radius:8px;"
+            f"padding:14px 16px;margin-bottom:12px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+            f"<div>"
+            f"<div style='font-size:0.9rem;font-weight:600;color:#e6edf3;'>{cfg.display_name}</div>"
+            f"<div style='font-size:0.7rem;color:#6e7681;margin-top:2px;'>{account_id}</div>"
+            f"</div>"
+            f"<div style='text-align:right;'>"
+            f"<span style='font-size:0.8rem;font-weight:700;color:{status_color};'>"
+            f"● {status_text}</span>"
+            f"<div style='font-size:0.68rem;color:#6e7681;margin-top:2px;'>Connected: {auth_time}</div>"
+            f"</div></div>{error_text}</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ── Login flow ────────────────────────────────────────────────────
+    # Select which account to reconnect (for multi-account setups)
+    zerodha_accounts = [
+        aid for aid in all_account_ids
+        if account_svc._account_configs.get(aid, {}) and
+           account_svc._account_configs[aid].broker == "zerodha"
+    ]
+
+    if not zerodha_accounts:
+        st.info("No Zerodha accounts configured. Set KITE_API_KEY in .env and restart.")
+        return
+
+    if len(zerodha_accounts) == 1:
+        target_id = zerodha_accounts[0]
+    else:
+        target_id = st.selectbox(
+            "Select account to reconnect",
+            zerodha_accounts,
+            format_func=lambda x: account_svc._account_configs[x].display_name,
+            key="auth_account_select",
+        )
+
+    st.session_state["auth_target_account"] = target_id
+    cfg = account_svc._account_configs.get(target_id)
+    api_key = cfg.credentials.get("api_key", "") if cfg else ""
+
+    if not api_key:
+        st.error(f"No api_key configured for {target_id}. Check .env.")
+        return
+
+    # ── Step 1: Open Kite login ───────────────────────────────────────
+    from brokers.zerodha.auth import get_login_url
+    login_url = get_login_url(api_key)
+
+    st.markdown("**Step 1 — Log in to Zerodha Kite**")
+    st.markdown(
+        f"<a href='{login_url}' target='_blank'>"
+        f"<button style='background:#238636;color:#fff;border:none;border-radius:6px;"
+        f"padding:8px 20px;font-size:0.85rem;font-weight:600;cursor:pointer;"
+        f"margin-bottom:8px;'>Open Kite Login ↗</button></a>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "After login, Zerodha redirects back to this dashboard with the token in the URL. "
+        "The page will detect it automatically — you don't need to copy anything."
+    )
+
+    st.markdown("**Step 2 — Automatic detection**")
+    st.info(
+        "Once you log in on Kite, the redirect will bring you back here. "
+        "The dashboard reads `?request_token=...` from the URL and exchanges it automatically. "
+        "If the redirect doesn't work, use Step 3 below."
+    )
+
+    # ── Step 3: Manual token entry (fallback) ─────────────────────────
+    with st.expander("Step 3 — Manual token entry (fallback)"):
+        st.caption(
+            "If the automatic redirect doesn't work, paste the full redirect URL "
+            "or just the request_token value from the URL bar."
+        )
+        manual_input = st.text_input(
+            "Paste redirect URL or request_token",
+            key="manual_token_input",
+            placeholder="https://...?request_token=abc123... or just abc123...",
+        )
+        if st.button("Exchange Token", key="manual_exchange_btn"):
+            if not manual_input.strip():
+                st.warning("Please paste the redirect URL or request_token first.")
+            else:
+                # Extract request_token from the input
+                raw = manual_input.strip()
+                if "request_token=" in raw:
+                    token_part = raw.split("request_token=")[-1]
+                    request_token = token_part.split("&")[0]
+                else:
+                    request_token = raw
+
+                api_secret = cfg.credentials.get("api_secret", "") if cfg else ""
+                if not api_secret:
+                    st.error(
+                        "api_secret not found in config. "
+                        "Set KITE_API_SECRET in .env."
+                    )
+                else:
+                    with st.spinner("Exchanging token…"):
+                        access_token = _exchange_token(api_key, api_secret, request_token)
+
+                    if access_token:
+                        ok = account_svc.refresh_session(
+                            account_id=target_id,
+                            access_token=access_token,
+                        )
+                        if ok:
+                            # Invalidate portfolio cache for this account
+                            if portfolio_svc:
+                                portfolio_svc.invalidate(target_id)
+                            st.success(
+                                f"✓ {cfg.display_name} reconnected. "
+                                "Token saved — no restart needed."
+                            )
+                            st.rerun()
+                        else:
+                            h2 = account_svc.get_health().get(target_id)
+                            st.error(f"Session refresh failed: {h2.error if h2 else 'unknown'}")
+                    else:
+                        st.error(
+                            "Token exchange failed. "
+                            "The request_token may be expired (single-use, ~5 min TTL). "
+                            "Please start over from Step 1."
+                        )

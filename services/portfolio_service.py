@@ -1,10 +1,14 @@
 """
 Portfolio service — per-account data access with live price injection.
 
-Fetches holdings and positions from broker adapters, then updates
-LTP values from the shared MarketDataManager before returning data.
-This keeps adapter calls (slow, rate-limited) separate from price
-updates (fast, from WebSocket).
+Fetches holdings and positions from broker adapters, then overlays
+the latest LTP from the MarketDataService before returning data.
+
+day_change semantics (critical):
+  h.day_change is the PER-SHARE price change vs. yesterday's close (₹).
+  Day P&L for a holding = h.day_change * h.quantity.
+  The inject step must NOT multiply by quantity — that happens in the
+  summary aggregation step only.
 """
 from __future__ import annotations
 
@@ -24,11 +28,9 @@ class PortfolioService:
         self._accounts = account_service
         self._md = market_data_service
 
-        # In-memory cache: account_id → data + fetch timestamp
-        self._holdings_cache: Dict[str, tuple] = {}   # (List[Holding], float)
+        self._holdings_cache:  Dict[str, tuple] = {}   # account_id → (data, fetched_at)
         self._positions_cache: Dict[str, tuple] = {}
-        self._margin_cache: Dict[str, tuple] = {}
-        self._summary_cache: Dict[str, tuple] = {}
+        self._margin_cache:    Dict[str, tuple] = {}
 
         self._ttl = 30.0  # seconds before re-fetching from broker
 
@@ -42,6 +44,11 @@ class PortfolioService:
         _, fetched_at = cache[key]
         return (time.monotonic() - fetched_at) > self._ttl
 
+    def invalidate(self, account_id: str):
+        """Force-expire all cached data for an account (e.g. after token refresh)."""
+        for cache in (self._holdings_cache, self._positions_cache, self._margin_cache):
+            cache.pop(account_id, None)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -49,28 +56,25 @@ class PortfolioService:
     def get_holdings(self, account_id: str, force_refresh: bool = False) -> List[Holding]:
         if force_refresh or self._is_stale(self._holdings_cache, account_id):
             self._refresh_holdings(account_id)
-
         data, _ = self._holdings_cache.get(account_id, ([], 0.0))
-        return self._inject_ltp_holdings(data)
+        return self._inject_ltp_holdings(list(data))   # work on a copy
 
     def get_positions(self, account_id: str, force_refresh: bool = False) -> List[Position]:
         if force_refresh or self._is_stale(self._positions_cache, account_id):
             self._refresh_positions(account_id)
-
         data, _ = self._positions_cache.get(account_id, ([], 0.0))
-        return self._inject_ltp_positions(data)
+        return self._inject_ltp_positions(list(data))
 
     def get_margin(self, account_id: str, force_refresh: bool = False) -> Optional[MarginInfo]:
         if force_refresh or self._is_stale(self._margin_cache, account_id):
             self._refresh_margin(account_id)
-
         data, _ = self._margin_cache.get(account_id, (None, 0.0))
         return data
 
     def get_account_summary(self, account_id: str, force_refresh: bool = False) -> Optional[AccountSummary]:
-        holdings = self.get_holdings(account_id, force_refresh)
+        holdings  = self.get_holdings(account_id, force_refresh)
         positions = self.get_positions(account_id, force_refresh)
-        margin = self.get_margin(account_id, force_refresh)
+        margin    = self.get_margin(account_id, force_refresh)
 
         adapter = self._accounts.get_adapter(account_id)
         info = adapter.get_account_info(account_id) if adapter else None
@@ -78,18 +82,35 @@ class PortfolioService:
             return None
 
         total_holdings_value = sum(h.current_value for h in holdings)
-        total_invested = sum(h.invested_value for h in holdings)
-        holdings_pnl = sum(h.pnl for h in holdings)
-        positions_pnl = sum(p.pnl for p in positions)
-        day_pnl = (
-            sum(h.day_change * h.quantity for h in holdings)
-            + sum(p.day_pnl for p in positions)
-        )
-        available_cash = margin.available_cash if margin else 0.0
-        used_margin = margin.used_margin if margin else 0.0
+        total_invested       = sum(h.invested_value for h in holdings)
+        holdings_pnl         = sum(h.pnl for h in holdings)
+        positions_pnl        = sum(p.pnl for p in positions)
 
-        cfg = self._accounts._account_configs.get(account_id)
+        # day_change is per-share — multiply by quantity to get day value change
+        holdings_day_pnl  = sum(h.day_change * h.quantity for h in holdings)
+        positions_day_pnl = sum(p.day_pnl for p in positions)
+        day_pnl           = round(holdings_day_pnl + positions_day_pnl, 2)
+
+        available_cash   = margin.available_cash   if margin else 0.0
+        net_available    = margin.net_available    if margin else 0.0
+        used_margin      = margin.used_margin      if margin else 0.0
+        total_collateral = margin.total_collateral if margin else 0.0
+
+        cfg          = self._accounts._account_configs.get(account_id)
         display_name = cfg.display_name if cfg else info.display_name
+
+        # net_worth = holdings at market price + pure cash
+        # (pledged holdings are already in total_holdings_value; collateral is NOT extra wealth)
+        net_worth = round(total_holdings_value + available_cash, 2)
+
+        logger.debug(
+            "AccountSummary '%s': %d holdings val=%.2f pnl=%.2f | "
+            "%d positions pnl=%.2f | day_pnl=%.2f | "
+            "cash=%.2f net_avail=%.2f collateral=%.2f net_worth=%.2f",
+            account_id, len(holdings), total_holdings_value, holdings_pnl,
+            len(positions), positions_pnl, day_pnl,
+            available_cash, net_available, total_collateral, net_worth,
+        )
 
         return AccountSummary(
             account_id=account_id,
@@ -101,10 +122,12 @@ class PortfolioService:
             holdings_pnl=round(holdings_pnl, 2),
             holdings_pnl_pct=round((holdings_pnl / total_invested) * 100, 2) if total_invested else 0.0,
             positions_pnl=round(positions_pnl, 2),
-            day_pnl=round(day_pnl, 2),
+            day_pnl=day_pnl,
             available_cash=available_cash,
+            net_available=net_available,
             used_margin=used_margin,
-            net_worth=round(total_holdings_value + available_cash, 2),
+            total_collateral=total_collateral,
+            net_worth=net_worth,
         )
 
     # ------------------------------------------------------------------
@@ -142,7 +165,7 @@ class PortfolioService:
             logger.error("Margin refresh failed for %s: %s", account_id, exc)
 
     # ------------------------------------------------------------------
-    # LTP injection
+    # LTP injection — overlays fresh prices from market data service
     # ------------------------------------------------------------------
 
     def _inject_ltp_holdings(self, holdings: List[Holding]) -> List[Holding]:
@@ -150,10 +173,14 @@ class PortfolioService:
             ltp = self._md.get_ltp(h.symbol)
             if ltp and ltp > 0:
                 h.update_ltp(ltp)
-                change = self._md.get_change(h.symbol)
-                change_pct = self._md.get_change_pct(h.symbol)
-                h.day_change = round(change * h.quantity, 2) if change else h.day_change
-                h.day_change_pct = change_pct or h.day_change_pct
+                # day_change must stay as PER-SHARE price change (not total value).
+                # It will be multiplied by quantity in the summary aggregation.
+                fresh_change     = self._md.get_change(h.symbol)
+                fresh_change_pct = self._md.get_change_pct(h.symbol)
+                if fresh_change:
+                    h.day_change = fresh_change          # ← per-share only, no × quantity
+                if fresh_change_pct:
+                    h.day_change_pct = fresh_change_pct
         return holdings
 
     def _inject_ltp_positions(self, positions: List[Position]) -> List[Position]:

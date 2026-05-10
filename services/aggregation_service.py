@@ -104,26 +104,30 @@ class AggregationService:
             return self._empty_metrics()
 
         total_holdings_value = sum(s.total_holdings_value for s in summaries)
-        total_invested = sum(s.total_invested_value for s in summaries)
-        holdings_pnl = sum(s.holdings_pnl for s in summaries)
-        positions_pnl = sum(s.positions_pnl for s in summaries)
-        day_pnl = sum(s.day_pnl for s in summaries)
-        available_cash = sum(s.available_cash for s in summaries)
-        used_margin = sum(s.used_margin for s in summaries)
-        net_worth = sum(s.net_worth for s in summaries)
+        total_invested   = sum(s.total_invested_value for s in summaries)
+        holdings_pnl     = sum(s.holdings_pnl for s in summaries)
+        positions_pnl    = sum(s.positions_pnl for s in summaries)
+        day_pnl          = sum(s.day_pnl for s in summaries)
+        available_cash   = sum(s.available_cash for s in summaries)
+        net_available    = sum(s.net_available for s in summaries)
+        used_margin      = sum(s.used_margin for s in summaries)
+        total_collateral = sum(s.total_collateral for s in summaries)
+        net_worth        = sum(s.net_worth for s in summaries)
 
         return {
             "total_holdings_value": round(total_holdings_value, 2),
             "total_invested_value": round(total_invested, 2),
-            "holdings_pnl": round(holdings_pnl, 2),
-            "holdings_pnl_pct": round((holdings_pnl / total_invested) * 100, 2) if total_invested else 0.0,
-            "positions_pnl": round(positions_pnl, 2),
-            "total_pnl": round(holdings_pnl + positions_pnl, 2),
-            "day_pnl": round(day_pnl, 2),
-            "available_cash": round(available_cash, 2),
-            "used_margin": round(used_margin, 2),
-            "net_worth": round(net_worth, 2),
-            "account_count": len(summaries),
+            "holdings_pnl":        round(holdings_pnl, 2),
+            "holdings_pnl_pct":    round((holdings_pnl / total_invested) * 100, 2) if total_invested else 0.0,
+            "positions_pnl":       round(positions_pnl, 2),
+            "total_pnl":           round(holdings_pnl + positions_pnl, 2),
+            "day_pnl":             round(day_pnl, 2),
+            "available_cash":      round(available_cash, 2),
+            "net_available":       round(net_available, 2),
+            "used_margin":         round(used_margin, 2),
+            "total_collateral":    round(total_collateral, 2),
+            "net_worth":           round(net_worth, 2),
+            "account_count":       len(summaries),
         }
 
     def _empty_metrics(self) -> dict:
@@ -131,7 +135,8 @@ class AggregationService:
             "total_holdings_value": 0.0, "total_invested_value": 0.0,
             "holdings_pnl": 0.0, "holdings_pnl_pct": 0.0,
             "positions_pnl": 0.0, "total_pnl": 0.0, "day_pnl": 0.0,
-            "available_cash": 0.0, "used_margin": 0.0,
+            "available_cash": 0.0, "net_available": 0.0,
+            "used_margin": 0.0, "total_collateral": 0.0,
             "net_worth": 0.0, "account_count": 0,
         }
 

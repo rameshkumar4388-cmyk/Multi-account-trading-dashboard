@@ -16,6 +16,7 @@ _PAGES = {
     "exposure":  ("⚖️",  "Exposure & Risk"),
     "account":   ("👤",  "Account View"),
     "holdings":  ("📁",  "Holdings"),
+    "auth":      ("🔑",  "Reconnect / Auth"),
 }
 
 
@@ -162,19 +163,21 @@ def render_sidebar(
                 unsafe_allow_html=True,
             )
 
-        # ── Failed-account help (live mode only) ──────────────────────
+        # ── Failed-account reconnect prompt (live mode) ───────────────
         failed = [aid for aid, h in health.items() if not h.is_active]
         if failed and settings.app_mode == "live":
-            with st.expander(f"⚠ {len(failed)} account(s) failed", expanded=False):
-                st.markdown(
-                    "<div style='font-size:0.72rem;color:#8b949e;line-height:1.5;'>"
-                    "Common fixes:<br>"
-                    "1. Generate a new access token at <strong>kite.zerodha.com</strong><br>"
-                    "2. Update <code>ZERODHA_&lt;TAG&gt;_ACCESS_TOKEN</code> in <code>.env</code><br>"
-                    "3. Restart the dashboard"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
+            st.markdown(
+                f"<div style='background:#2d1b1b;border:1px solid #f85149;border-radius:6px;"
+                f"padding:8px 10px;margin-top:4px;'>"
+                f"<div style='font-size:0.72rem;color:#f85149;font-weight:600;margin-bottom:4px;'>"
+                f"⚠ {len(failed)} account(s) disconnected</div>"
+                f"<div style='font-size:0.68rem;color:#8b949e;'>Token expired at 6 AM IST.</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("🔑 Reconnect Now", use_container_width=True, key="sidebar_reconnect"):
+                st.session_state.active_page = "auth"
+                st.rerun()
 
         st.divider()
 

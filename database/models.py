@@ -93,4 +93,19 @@ CREATE_TABLES_SQL = [
         PRIMARY KEY (account_id, data_type)
     )
     """,
+    # Persists Zerodha access tokens between app restarts.
+    # Tokens are valid until ~6 AM IST next calendar day.
+    # The access_token column is the only secret stored here —
+    # api_key is not a secret but is stored for completeness.
+    # api_secret is intentionally NOT stored (stays in .env only).
+    """
+    CREATE TABLE IF NOT EXISTS stored_tokens (
+        account_id    TEXT PRIMARY KEY,
+        api_key       TEXT NOT NULL,
+        access_token  TEXT NOT NULL,
+        generated_at  TEXT NOT NULL,
+        user_id       TEXT DEFAULT '',
+        user_name     TEXT DEFAULT ''
+    )
+    """,
 ]
