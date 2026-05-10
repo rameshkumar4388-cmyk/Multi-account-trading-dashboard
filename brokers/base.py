@@ -55,6 +55,14 @@ class BrokerAdapter(ABC):
     def get_account_summary(self, account_id: str) -> Optional[AccountSummary]:
         """Return a pre-computed account summary."""
 
+    def get_kite_session(self, account_id: str):
+        """
+        Return the underlying KiteConnect session for this account, or None.
+        Only ZerodhaAdapter returns a real object; all other adapters return None.
+        Used by the market data layer to attach a live price feed.
+        """
+        return None
+
     def get_subscribed_symbols(self, account_id: str) -> List[str]:
         """
         Return symbols to subscribe to for live market data.

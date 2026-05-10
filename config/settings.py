@@ -154,12 +154,54 @@ def _mock_accounts() -> List[AccountConfig]:
     ]
 
 
+def _load_kite_single_account_from_env() -> List[AccountConfig]:
+    """
+    Support the simple flat naming convention:
+        KITE_API_KEY, KITE_API_SECRET, KITE_ACCESS_TOKEN
+        KITE_USER_ID, KITE_DISPLAY_NAME  (optional)
+
+    This is an alternative to ZERODHA_<TAG>_* for setups with one account.
+    Also accepts ZERODHA_API_KEY / ZERODHA_ACCESS_TOKEN (no tag) as aliases.
+    """
+    for prefix, acct_id, default_name in [
+        ("KITE",    "zerodha_kite",    "Zerodha (Kite)"),
+        ("ZERODHA", "zerodha_primary", "Zerodha"),
+    ]:
+        api_key      = os.getenv(f"{prefix}_API_KEY", "").strip()
+        api_secret   = os.getenv(f"{prefix}_API_SECRET", "").strip()
+        access_token = os.getenv(f"{prefix}_ACCESS_TOKEN", "").strip()
+        user_id      = os.getenv(f"{prefix}_USER_ID", "").strip()
+        display_name = os.getenv(f"{prefix}_DISPLAY_NAME", default_name).strip()
+
+        if _is_placeholder(api_key) or _is_placeholder(access_token):
+            continue
+
+        logger.info("Registered account via %s_* env vars: %s", prefix, acct_id)
+        return [AccountConfig(
+            account_id=acct_id,
+            broker="zerodha",
+            display_name=display_name,
+            owner=user_id or display_name,
+            enabled=True,
+            credentials={
+                "api_key": api_key,
+                "api_secret": api_secret,
+                "access_token": access_token,
+                "user_id": user_id,
+            },
+            metadata={"original_broker": "zerodha", "account_type": "live"},
+        )]
+
+    return []
+
+
 def load_settings() -> AppSettings:
     mode    = os.getenv("APP_MODE", "mock").lower().strip()
     db_path = os.getenv("DB_PATH", "data/dashboard.db").strip()
 
     if mode == "live":
-        accounts = _load_accounts_from_env()
+        # Try tagged multi-account pattern first, then flat single-account pattern
+        accounts = _load_accounts_from_env() or _load_kite_single_account_from_env()
         if not accounts:
             logger.warning(
                 "APP_MODE=live but no valid Zerodha accounts found in .env — "

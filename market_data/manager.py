@@ -49,13 +49,40 @@ class MarketDataManager:
         logger.info("MarketDataManager initialized in '%s' mode", self._mode)
 
     def _init_live_feed(self):
+        """Live mode: no feed until attach_feed() is called with a live source."""
+        logger.info("Live feed mode: price feed not yet attached — call attach_feed()")
+
+    def attach_feed(self, feed):
         """
-        Placeholder for live WebSocket feed initialization.
-        In Zerodha live mode, initialize KiteTicker here.
-        Each broker adapter can register its own WebSocket handler
-        and call push_ticks() to feed prices into the shared store.
+        Inject a live price feed (e.g. ZerodhaQuoteFeed) after initialization.
+
+        The feed must expose:
+            subscribe(symbols: List[str])
+            add_callback(fn)
+            start()
+            stop()
+            get_ltp(symbol) -> Optional[float]
+            get_all_prices() -> Dict[str, float]
+
+        Safe to call multiple times; subsequent calls replace the previous feed.
         """
-        logger.info("Live feed mode: waiting for broker WebSocket connections")
+        if self._feed and hasattr(self._feed, "stop"):
+            try:
+                self._feed.stop()
+            except Exception:
+                pass
+
+        self._feed = feed
+        feed.add_callback(self._on_ticks)
+
+        # Re-subscribe all symbols the manager already knows about
+        with self._lock:
+            known = list(self._prices.keys())
+        if known:
+            feed.subscribe(known)
+
+        feed.start()
+        logger.info("Live feed attached: %s", type(feed).__name__)
 
     def shutdown(self):
         if self._feed and hasattr(self._feed, "stop"):
@@ -94,8 +121,10 @@ class MarketDataManager:
 
     def get_ltp(self, symbol: str) -> Optional[float]:
         with self._lock:
-            if self._mode == "mock" and self._feed:
-                return self._feed.get_ltp(symbol)
+            if self._feed and hasattr(self._feed, "get_ltp"):
+                live = self._feed.get_ltp(symbol)
+                if live:
+                    return live
             return self._prices.get(symbol)
 
     def get_change(self, symbol: str) -> float:
@@ -107,7 +136,7 @@ class MarketDataManager:
             return self._changes_pct.get(symbol, 0.0)
 
     def get_all_prices(self) -> Dict[str, float]:
-        if self._mode == "mock" and self._feed:
+        if self._feed and hasattr(self._feed, "get_all_prices"):
             return self._feed.get_all_prices()
         with self._lock:
             return dict(self._prices)

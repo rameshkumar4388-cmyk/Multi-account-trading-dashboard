@@ -62,6 +62,10 @@ def _get_market_data_service(_settings, _account_svc):
     svc = MarketDataService(_settings)
     symbols = _account_svc.get_all_symbols()
     svc.initialize(symbols)
+    # In live mode, attach Zerodha polling feed so prices update every N seconds
+    if _settings.app_mode == "live":
+        sessions = _account_svc.get_kite_sessions()
+        svc.attach_zerodha_feed(sessions, symbols)
     return svc
 
 

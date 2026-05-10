@@ -46,6 +46,36 @@ class MarketDataService:
     def get_ticks(self, symbols: List[str]) -> List[Tick]:
         return self._manager.get_ticks(symbols)
 
+    def attach_zerodha_feed(self, kite_sessions: dict, symbols: List[str] = None):
+        """
+        Attach a live Zerodha polling feed to the market data manager.
+
+        Call this once after accounts have been authenticated in live mode.
+        Safe to call with an empty sessions dict — does nothing in that case.
+
+        Args:
+            kite_sessions: Dict of account_id → KiteConnect from AccountService.
+            symbols:       Optional list of symbols to subscribe immediately.
+        """
+        if self._settings.app_mode != "live":
+            return
+        if not kite_sessions:
+            logger.warning("attach_zerodha_feed: no live sessions — skipping")
+            return
+
+        from brokers.zerodha.quote_feed import ZerodhaQuoteFeed
+        feed = ZerodhaQuoteFeed(
+            sessions=kite_sessions,
+            interval=float(self._settings.market_data_refresh_interval),
+        )
+        if symbols:
+            feed.subscribe(symbols)
+        self._manager.attach_feed(feed)
+        logger.info(
+            "Zerodha quote feed attached (%d session(s), %d symbol(s))",
+            len(kite_sessions), len(symbols or []),
+        )
+
     def push_ticks(self, ticks: List[Tick]):
         """Called by live broker WebSocket handlers."""
         self._manager.push_ticks(ticks)

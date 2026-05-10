@@ -169,6 +169,19 @@ class AccountService:
                 infos.append(info)
         return infos
 
+    def get_kite_sessions(self) -> dict:
+        """
+        Return active KiteConnect sessions keyed by account_id.
+        Only Zerodha accounts have sessions; others are excluded.
+        Used by the market data layer to attach a live price feed.
+        """
+        sessions: dict = {}
+        for aid, adapter in self._adapters.items():
+            session = adapter.get_kite_session(aid)
+            if session is not None:
+                sessions[aid] = session
+        return sessions
+
     def get_all_symbols(self) -> List[str]:
         symbols: List[str] = []
         for aid, adapter in self._adapters.items():

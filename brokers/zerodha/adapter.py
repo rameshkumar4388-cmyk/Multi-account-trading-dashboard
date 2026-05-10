@@ -117,6 +117,10 @@ class ZerodhaAdapter(BrokerAdapter):
     def is_session_valid(self, account_id: str) -> bool:
         return account_id in self._sessions
 
+    def get_kite_session(self, account_id: str):
+        """Return the live KiteConnect instance for this account, or None."""
+        return self._sessions.get(account_id)
+
     def _kite(self, account_id: str):
         session = self._sessions.get(account_id)
         if not session:
