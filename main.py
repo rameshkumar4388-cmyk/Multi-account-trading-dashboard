@@ -86,10 +86,11 @@ def main():
     portfolio_svc = _get_portfolio_service(account_svc, md_svc)
     aggregation_svc = _get_aggregation_service(account_svc, portfolio_svc)
 
-    account_ids = account_svc.list_account_ids()
+    account_ids     = account_svc.list_account_ids()
+    account_health  = account_svc.get_health()
 
     # ── Sidebar navigation ────────────────────────────────────────────
-    view, selected_account = render_sidebar(settings, account_ids)
+    view, selected_account = render_sidebar(settings, account_ids, account_health)
 
     # ── Combined metrics for header ───────────────────────────────────
     try:

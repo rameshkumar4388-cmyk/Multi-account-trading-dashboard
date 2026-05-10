@@ -18,46 +18,100 @@ from schemas.position import Position
 logger = logging.getLogger(__name__)
 
 
+def _friendly_error(exc: Exception) -> str:
+    """Map kiteconnect exception types to actionable human-readable messages."""
+    name = type(exc).__name__
+    msg = str(exc)
+    if "TokenException" in name or "InvalidToken" in name or "token" in msg.lower():
+        return (
+            "Access token invalid or expired. "
+            "Log in at kite.zerodha.com, generate a new token, and update ACCESS_TOKEN in .env."
+        )
+    if "NetworkException" in name or "ConnectionError" in name:
+        return "Network error — check your internet connection and try again."
+    if "TwoFAException" in name:
+        return "Two-factor authentication required — complete login in the Zerodha app."
+    if "UserException" in name:
+        return f"User error: {msg}"
+    if "InputException" in name:
+        return f"Bad request (check api_key / credentials): {msg}"
+    if "DataException" in name:
+        return f"Zerodha API data error: {msg}"
+    if "PermissionException" in name:
+        return f"Permission denied — check API subscription: {msg}"
+    return f"{name}: {msg}"
+
+
 class ZerodhaAdapter(BrokerAdapter):
     """
     Live Zerodha adapter using KiteConnect REST API.
-    Supports multiple accounts via separate KiteConnect instances.
+    One adapter instance manages all accounts via separate KiteConnect
+    sessions keyed by account_id.
+
+    After a failed authenticate() call, last_auth_error holds a
+    human-readable explanation of why it failed.
     """
 
     def __init__(self):
         self._sessions: Dict[str, object] = {}   # account_id → KiteConnect instance
+        self._last_auth_error: Optional[str] = None
 
     @property
     def broker_name(self) -> str:
         return "zerodha"
+
+    @property
+    def last_auth_error(self) -> Optional[str]:
+        """Human-readable error from the most recent failed authenticate() call."""
+        return self._last_auth_error
 
     # ------------------------------------------------------------------
     # Auth
     # ------------------------------------------------------------------
 
     def authenticate(self, account_id: str, credentials: dict) -> bool:
+        self._last_auth_error = None
+
+        # ── Dependency check ──────────────────────────────────────────
         try:
             from kiteconnect import KiteConnect
         except ImportError:
-            logger.error("kiteconnect not installed. Run: pip install kiteconnect")
+            self._last_auth_error = (
+                "kiteconnect package not installed. Run: pip install kiteconnect"
+            )
+            logger.error(self._last_auth_error)
             return False
 
-        api_key = credentials.get("api_key")
-        access_token = credentials.get("access_token")
-        if not api_key or not access_token:
-            logger.error("Missing api_key or access_token for account %s", account_id)
+        # ── Credentials check ─────────────────────────────────────────
+        api_key      = (credentials.get("api_key") or "").strip()
+        access_token = (credentials.get("access_token") or "").strip()
+
+        if not api_key:
+            self._last_auth_error = f"api_key missing for account '{account_id}'"
+            logger.error(self._last_auth_error)
+            return False
+        if not access_token:
+            self._last_auth_error = f"access_token missing for account '{account_id}'"
+            logger.error(self._last_auth_error)
             return False
 
+        # ── Live auth ─────────────────────────────────────────────────
         try:
             kite = KiteConnect(api_key=api_key)
             kite.set_access_token(access_token)
-            # Validate session with a lightweight call
-            profile = kite.profile()
+            profile = kite.profile()          # lightweight session-validation call
             self._sessions[account_id] = kite
-            logger.info("Authenticated Zerodha account %s (%s)", account_id, profile.get("user_name"))
+            logger.info(
+                "Authenticated Zerodha account '%s' as %s",
+                account_id, profile.get("user_name", "unknown"),
+            )
             return True
+
         except Exception as exc:
-            logger.error("Zerodha authentication failed for %s: %s", account_id, exc)
+            self._last_auth_error = _friendly_error(exc)
+            logger.error(
+                "Zerodha auth failed for '%s': %s", account_id, self._last_auth_error
+            )
             return False
 
     def is_session_valid(self, account_id: str) -> bool:
@@ -66,11 +120,14 @@ class ZerodhaAdapter(BrokerAdapter):
     def _kite(self, account_id: str):
         session = self._sessions.get(account_id)
         if not session:
-            raise RuntimeError(f"No active session for account {account_id}. Call authenticate() first.")
+            raise RuntimeError(
+                f"No active Zerodha session for account '{account_id}'. "
+                "Call authenticate() first."
+            )
         return session
 
     # ------------------------------------------------------------------
-    # Data fetching — raw Kite data → normalized schemas
+    # Data fetching — raw Kite responses → normalised internal schemas
     # ------------------------------------------------------------------
 
     def get_account_info(self, account_id: str) -> Optional[AccountInfo]:
@@ -87,14 +144,14 @@ class ZerodhaAdapter(BrokerAdapter):
                 metadata={"exchanges": profile.get("exchanges", [])},
             )
         except Exception as exc:
-            logger.error("get_account_info failed for %s: %s", account_id, exc)
+            logger.error("get_account_info failed for '%s': %s", account_id, exc)
             return None
 
     def get_holdings(self, account_id: str) -> List[Holding]:
         try:
             raw = self._kite(account_id).holdings()
         except Exception as exc:
-            logger.error("get_holdings failed for %s: %s", account_id, exc)
+            logger.error("get_holdings failed for '%s': %s", account_id, exc)
             return []
 
         holdings: List[Holding] = []
@@ -102,8 +159,6 @@ class ZerodhaAdapter(BrokerAdapter):
             qty = int(r.get("quantity", 0))
             if qty <= 0:
                 continue
-            avg = float(r.get("average_price", 0))
-            ltp = float(r.get("last_price", 0))
             h = Holding(
                 account_id=account_id,
                 broker="zerodha",
@@ -111,13 +166,13 @@ class ZerodhaAdapter(BrokerAdapter):
                 exchange=r.get("exchange", "NSE"),
                 isin=r.get("isin", ""),
                 quantity=qty,
-                avg_price=avg,
-                ltp=ltp,
+                avg_price=float(r.get("average_price", 0)),
+                ltp=float(r.get("last_price", 0)),
                 sector=r.get("sector", "Unknown"),
                 instrument_type="EQ",
                 tradingsymbol=r.get("tradingsymbol", ""),
             )
-            h.day_change = float(r.get("day_change", 0))
+            h.day_change     = float(r.get("day_change", 0))
             h.day_change_pct = float(r.get("day_change_percentage", 0))
             holdings.append(h)
 
@@ -127,25 +182,22 @@ class ZerodhaAdapter(BrokerAdapter):
         try:
             raw_all = self._kite(account_id).positions()
         except Exception as exc:
-            logger.error("get_positions failed for %s: %s", account_id, exc)
+            logger.error("get_positions failed for '%s': %s", account_id, exc)
             return []
 
         positions: List[Position] = []
-        net_positions = raw_all.get("net", [])
-
-        for r in net_positions:
+        for r in raw_all.get("net", []):
             qty = int(r.get("quantity", 0))
             if qty == 0:
                 continue
-
-            instrument_type = r.get("instrument_type", "EQ")
-            pos = Position(
+            itype = r.get("instrument_type", "EQ")
+            positions.append(Position(
                 account_id=account_id,
                 broker="zerodha",
                 symbol=r.get("tradingsymbol", ""),
                 exchange=r.get("exchange", "NSE"),
                 product=r.get("product", "MIS"),
-                instrument_type=instrument_type,
+                instrument_type=itype,
                 quantity=qty,
                 avg_price=float(r.get("average_price", 0)),
                 ltp=float(r.get("last_price", 0)),
@@ -154,13 +206,12 @@ class ZerodhaAdapter(BrokerAdapter):
                 value=float(r.get("value", 0)),
                 buy_quantity=int(r.get("buy_quantity", 0)),
                 sell_quantity=int(r.get("sell_quantity", 0)),
-                lot_size=int(r.get("lot_size", 1)) if instrument_type != "EQ" else 1,
+                lot_size=int(r.get("lot_size", 1)) if itype != "EQ" else 1,
                 expiry=str(r.get("expiry", "")) or None,
                 strike=float(r.get("strike", 0)) or None,
                 underlying=r.get("tradingsymbol", ""),
                 tradingsymbol=r.get("tradingsymbol", ""),
-            )
-            positions.append(pos)
+            ))
 
         return positions
 
@@ -168,12 +219,12 @@ class ZerodhaAdapter(BrokerAdapter):
         try:
             funds = self._kite(account_id).margins()
         except Exception as exc:
-            logger.error("get_margin failed for %s: %s", account_id, exc)
+            logger.error("get_margin failed for '%s': %s", account_id, exc)
             return None
 
-        equity = funds.get("equity", {})
+        equity    = funds.get("equity", {})
         available = equity.get("available", {})
-        utilised = equity.get("utilised", {})
+        utilised  = equity.get("utilised", {})
 
         return MarginInfo(
             account_id=account_id,
@@ -188,24 +239,24 @@ class ZerodhaAdapter(BrokerAdapter):
         )
 
     def get_account_summary(self, account_id: str) -> Optional[AccountSummary]:
-        holdings = self.get_holdings(account_id)
+        holdings  = self.get_holdings(account_id)
         positions = self.get_positions(account_id)
-        margin = self.get_margin(account_id)
-        info = self.get_account_info(account_id)
+        margin    = self.get_margin(account_id)
+        info      = self.get_account_info(account_id)
 
         if not info:
             return None
 
         total_holdings_value = sum(h.current_value for h in holdings)
-        total_invested = sum(h.invested_value for h in holdings)
-        holdings_pnl = sum(h.pnl for h in holdings)
-        positions_pnl = sum(p.pnl for p in positions)
+        total_invested       = sum(h.invested_value for h in holdings)
+        holdings_pnl         = sum(h.pnl for h in holdings)
+        positions_pnl        = sum(p.pnl for p in positions)
         day_pnl = (
             sum(h.day_change * h.quantity for h in holdings)
             + sum(p.day_pnl for p in positions)
         )
         available_cash = margin.available_cash if margin else 0.0
-        used_margin = margin.used_margin if margin else 0.0
+        used_margin    = margin.used_margin    if margin else 0.0
 
         return AccountSummary(
             account_id=account_id,
