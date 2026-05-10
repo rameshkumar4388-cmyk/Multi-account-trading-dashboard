@@ -185,9 +185,8 @@ def render_holdings_treemap(holdings_data: List[dict]):
             cmid=0,
             showscale=True,
             colorbar=dict(
-                title="P&L %",
+                title=dict(text="P&L %", font=dict(color=_TEXT, size=10)),
                 tickfont=dict(color=_TEXT, size=10),
-                titlefont=dict(color=_TEXT, size=10),
             ),
         ),
         texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2f}%",
