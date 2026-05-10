@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(New-Item *)",
+      "PowerShell(cd \"C:\\\\Users\\\\brave\\\\Desktop\\\\dashboard\"; $env:PYTHONIOENCODING=\"utf-8\"; python check_services.py 2>&1)",
+      "PowerShell(Start-Sleep -Seconds 4; $response = try { Invoke-WebRequest -Uri \"http://localhost:8501\" -TimeoutSec 5 -UseBasicParsing } catch { $null }; if \\($response\\) { \"Server is UP - Status: $\\($response.StatusCode\\)\" } else { \"Server not responding yet\" })",
+      "PowerShell(Start-Sleep -Seconds 5; $response = try { Invoke-WebRequest -Uri \"http://localhost:8501\" -TimeoutSec 8 -UseBasicParsing } catch { $null }; if \\($response\\) { \"Server UP - Status: $\\($response.StatusCode\\)\" } else { \"Still not ready\" })",
+      "PowerShell(Get-Process *)",
+      "PowerShell(cd \"C:\\\\Users\\\\brave\\\\Desktop\\\\dashboard\"; $proc = Start-Process -FilePath \"python\" -ArgumentList \"-m streamlit run main.py --server.port 8501 --server.headless true --browser.gatherUsageStats false\" -PassThru -RedirectStandardOutput \"streamlit_out.log\" -RedirectStandardError \"streamlit_err.log\"; $proc.Id)",
+      "PowerShell(Start-Sleep -Seconds 8; $response = try { Invoke-WebRequest -Uri \"http://localhost:8501/healthz\" -TimeoutSec 5 -UseBasicParsing } catch { $null }; if \\($response\\) { \"UP: $\\($response.StatusCode\\)\" } else { \"Not ready - checking logs...\" }; Get-Content \"C:\\\\Users\\\\brave\\\\Desktop\\\\dashboard\\\\streamlit_err.log\" -ErrorAction SilentlyContinue | Select-Object -Last 30)",
+      "PowerShell($r = Invoke-WebRequest -Uri \"http://localhost:8501\" -UseBasicParsing -TimeoutSec 5; \"Status: $\\($r.StatusCode\\)\"; \"Content length: $\\($r.Content.Length\\) bytes\"; if \\($r.Content -match \"Portfolio Dashboard\"\\) { \"Title found: YES\" } else { \"Title: not found\" })",
+      "PowerShell($r = Invoke-WebRequest -Uri \"http://localhost:8501\" -UseBasicParsing -TimeoutSec 5; $r.Content | Select-String \"Portfolio|streamlit|title\" | Select-Object -First 5)",
+      "PowerShell($r = Invoke-WebRequest -Uri \"http://localhost:8501/st-allowed-message-origins\" -UseBasicParsing -TimeoutSec 5 -ErrorAction SilentlyContinue; if \\($r\\) { $r.StatusCode } else { \"endpoint not found \\(normal\\)\" })",
+      "PowerShell(Start-Sleep -Seconds 6; $r = try { Invoke-WebRequest -Uri \"http://localhost:8501/healthz\" -TimeoutSec 5 -UseBasicParsing } catch { $null }; if \\($r -and $r.StatusCode -eq 200\\) { \"UP\" } else { \"Not ready\" })",
+      "PowerShell(Start-Sleep -Seconds 6; $r = try { Invoke-WebRequest -Uri \"http://localhost:8501/healthz\" -TimeoutSec 5 -UseBasicParsing } catch { $null }; if \\($r -and $r.StatusCode -eq 200\\) { \"UP\" } else { \"Still waiting...\" })",
+      "PowerShell(Start-Process \"http://localhost:8501\")"
+    ]
+  }
+}
