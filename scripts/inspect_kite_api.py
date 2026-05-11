@@ -23,10 +23,11 @@ Outputs written to debug_api/:
     report_margins.txt    — all margin-related fields
     report_pnl.txt        — all P&L-related fields
 
-Authentication priority (first found wins):
-    1. KITE_ACCESS_TOKEN + KITE_API_KEY          (flat .env naming)
-    2. ZERODHA_<TAG>_ACCESS_TOKEN for every TAG  (tagged multi-account)
-    3. Stored token in data/dashboard.db          (if exists and fresh)
+Authentication priority (tries each in order, skips on failure):
+    1. DB stored_tokens                          (freshest — written by auth page)
+    2. Tagged env vars ZERODHA_<TAG>_*           (multi-account .env)
+    3. Flat env vars ZERODHA_* (no tag)
+    4. Flat env vars KITE_*                      (tried last — most likely stale)
 """
 from __future__ import annotations
 
@@ -68,22 +69,40 @@ def _is_real(v: str) -> bool:
     return bool(v) and v.strip() not in PLACEHOLDER
 
 def _discover_credentials() -> list[dict]:
-    """Return list of {api_key, access_token, label} dicts, best first."""
+    """
+    Return list of {api_key, access_token, label} dicts ordered by
+    likelihood of being fresh.  DB tokens are tried first because they
+    are written by the auth page after every successful daily login.
+    Flat .env vars (KITE_*) come last — they are the most likely to be
+    stale after the daily 06:00 IST expiry.
+    """
     creds = []
 
-    # 1. Flat KITE_* naming
-    k = os.getenv("KITE_API_KEY", "").strip()
-    t = os.getenv("KITE_ACCESS_TOKEN", "").strip()
-    if _is_real(k) and _is_real(t):
-        creds.append({"api_key": k, "access_token": t, "label": "KITE_*"})
+    # ── 1. DB stored_tokens (freshest — written by the auth page) ────
+    db_path = ROOT / os.getenv("DB_PATH", "data/dashboard.db")
+    if db_path.exists():
+        try:
+            con = sqlite3.connect(str(db_path))
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                "SELECT * FROM stored_tokens ORDER BY generated_at DESC"
+            ).fetchall()
+            con.close()
+            for row in rows:
+                k   = (row["api_key"] or "").strip()
+                t   = (row["access_token"] or "").strip()
+                gen = row["generated_at"]
+                if _is_real(k) and _is_real(t):
+                    creds.append({
+                        "api_key":      k,
+                        "access_token": t,
+                        "label":        f"DB:{row['account_id']} (generated {gen})",
+                        "source":       "db",
+                    })
+        except Exception as e:
+            print(f"  [warn] could not read stored_tokens from DB: {e}")
 
-    # 2. Flat ZERODHA_* naming (no tag)
-    k = os.getenv("ZERODHA_API_KEY", "").strip()
-    t = os.getenv("ZERODHA_ACCESS_TOKEN", "").strip()
-    if _is_real(k) and _is_real(t):
-        creds.append({"api_key": k, "access_token": t, "label": "ZERODHA_*"})
-
-    # 3. Tagged ZERODHA_<TAG>_* naming
+    # ── 2. Tagged ZERODHA_<TAG>_* (multi-account .env) ───────────────
     for key in sorted(os.environ):
         if key.startswith("ZERODHA_") and key.endswith("_API_KEY"):
             tag = key[len("ZERODHA_"):-len("_API_KEY")]
@@ -92,43 +111,59 @@ def _discover_credentials() -> list[dict]:
             k = os.getenv(f"ZERODHA_{tag}_API_KEY", "").strip()
             t = os.getenv(f"ZERODHA_{tag}_ACCESS_TOKEN", "").strip()
             if _is_real(k) and _is_real(t):
-                creds.append({"api_key": k, "access_token": t, "label": f"ZERODHA_{tag}_*"})
+                creds.append({
+                    "api_key":      k,
+                    "access_token": t,
+                    "label":        f"env:ZERODHA_{tag}_*",
+                    "source":       "env_tagged",
+                })
 
-    # 4. Stored token in SQLite (dashboard database)
-    db_path = ROOT / os.getenv("DB_PATH", "data/dashboard.db")
-    if db_path.exists():
-        try:
-            con = sqlite3.connect(str(db_path))
-            con.row_factory = sqlite3.Row
-            rows = con.execute("SELECT * FROM stored_tokens").fetchall()
-            con.close()
-            for row in rows:
-                k = row["api_key"]
-                t = row["access_token"]
-                gen = row["generated_at"]
-                if _is_real(k) and _is_real(t):
-                    creds.append({
-                        "api_key": k,
-                        "access_token": t,
-                        "label": f"DB:{row['account_id']} (generated {gen})",
-                    })
-        except Exception as e:
-            print(f"  [warn] could not read stored_tokens from DB: {e}")
+    # ── 3. Flat ZERODHA_* (no tag) ────────────────────────────────────
+    k = os.getenv("ZERODHA_API_KEY", "").strip()
+    t = os.getenv("ZERODHA_ACCESS_TOKEN", "").strip()
+    if _is_real(k) and _is_real(t):
+        creds.append({
+            "api_key":      k,
+            "access_token": t,
+            "label":        "env:ZERODHA_*",
+            "source":       "env_flat",
+        })
+
+    # ── 4. Flat KITE_* (tried last — most likely stale) ───────────────
+    k = os.getenv("KITE_API_KEY", "").strip()
+    t = os.getenv("KITE_ACCESS_TOKEN", "").strip()
+    if _is_real(k) and _is_real(t):
+        creds.append({
+            "api_key":      k,
+            "access_token": t,
+            "label":        "env:KITE_*",
+            "source":       "env_kite",
+        })
 
     return creds
 
 
 # ── Auth ──────────────────────────────────────────────────────────────
-def _auth(cred: dict):
+def _try_auth(cred: dict) -> tuple:
+    """
+    Attempt to authenticate with one credential set.
+
+    Returns (kite_instance, profile_dict) on success.
+    Returns (None, error_message_str) on failure.
+    Never raises — all exceptions are caught and returned as strings.
+    """
     try:
         from kiteconnect import KiteConnect
     except ImportError:
-        print("ERROR: kiteconnect not installed. Run: pip install kiteconnect")
-        sys.exit(1)
+        return None, "kiteconnect not installed — run: pip install kiteconnect"
 
-    kite = KiteConnect(api_key=cred["api_key"])
-    kite.set_access_token(cred["access_token"])
-    return kite
+    try:
+        kite = KiteConnect(api_key=cred["api_key"])
+        kite.set_access_token(cred["access_token"])
+        profile = kite.profile()   # single lightweight validation call
+        return kite, profile
+    except Exception as exc:
+        return None, str(exc)
 
 
 # ── Field discovery ───────────────────────────────────────────────────
@@ -248,34 +283,63 @@ def main():
     print(f"Output directory: {OUT}")
     print(f"Timestamp: {datetime.now().isoformat()}")
 
-    # ── Find credentials ──────────────────────────────────────────────
-    _section("Credential Discovery")
+    # ── Discover and try credentials in priority order ────────────────
+    _section("Credential Discovery & Authentication")
     creds = _discover_credentials()
+
     if not creds:
-        print("ERROR: No Kite credentials found.")
-        print("Set KITE_API_KEY and KITE_ACCESS_TOKEN in .env")
+        print("  ERROR: no credentials found in DB or .env")
+        print("  Ensure at least one of the following is set:")
+        print("    data/dashboard.db → stored_tokens table")
+        print("    .env: ZERODHA_ACC1_API_KEY + ZERODHA_ACC1_ACCESS_TOKEN")
+        print("    .env: KITE_API_KEY + KITE_ACCESS_TOKEN")
         sys.exit(1)
 
-    for i, c in enumerate(creds):
-        print(f"  [{i+1}] {c['label']}")
+    print(f"  Found {len(creds)} candidate credential set(s):\n")
 
-    cred = creds[0]
-    print(f"\nUsing: {cred['label']}")
-    print(f"API key: {cred['api_key'][:8]}{'*' * (len(cred['api_key']) - 8)}")
+    kite       = None
+    profile_raw = None
+    used_cred  = None
 
-    # ── Authenticate ──────────────────────────────────────────────────
-    _section("Authentication")
-    try:
-        kite = _auth(cred)
-        profile_raw = kite.profile()
-        print(f"  Authenticated as: {profile_raw.get('user_name', '?')}")
-        print(f"  User ID        : {profile_raw.get('user_id', '?')}")
-        print(f"  Email          : {profile_raw.get('email', '?')}")
-        print(f"  Exchanges      : {profile_raw.get('exchanges', [])}")
-        print(f"  Products       : {profile_raw.get('products', [])}")
-    except Exception as e:
-        print(f"  AUTH FAILED: {e}")
+    for i, cred in enumerate(creds, 1):
+        api_key_preview = cred["api_key"][:6] + "…" if len(cred["api_key"]) > 6 else cred["api_key"]
+        token_preview   = cred["access_token"][:6] + "…" if len(cred["access_token"]) > 6 else cred["access_token"]
+
+        print(f"  [{i}/{len(creds)}] {cred['label']}")
+        print(f"         api_key      : {api_key_preview}")
+        print(f"         access_token : {token_preview}")
+        print(f"         → attempting kite.profile() …", end=" ", flush=True)
+
+        result, detail = _try_auth(cred)
+
+        if result is not None:
+            # Success
+            kite        = result
+            profile_raw = detail
+            used_cred   = cred
+            print("SUCCESS")
+            print(f"         ✓ authenticated as {profile_raw.get('user_name', '?')} "
+                  f"({profile_raw.get('user_id', '?')})")
+            break
+        else:
+            # Failure — log and continue to next candidate
+            print("FAILED")
+            print(f"         ✗ {detail}")
+            if i < len(creds):
+                print(f"         → trying next credential source…\n")
+
+    if kite is None:
+        print(f"\n  All {len(creds)} credential source(s) exhausted — none authenticated.")
+        print("  To fix: run the dashboard auth page to generate a fresh token,")
+        print("  or update KITE_ACCESS_TOKEN / ZERODHA_*_ACCESS_TOKEN in .env")
         sys.exit(1)
+
+    print(f"\n  Selected source : {used_cred['label']}")
+    print(f"  User name       : {profile_raw.get('user_name', '?')}")
+    print(f"  User ID         : {profile_raw.get('user_id', '?')}")
+    print(f"  Email           : {profile_raw.get('email', '?')}")
+    print(f"  Exchanges       : {profile_raw.get('exchanges', [])}")
+    print(f"  Products        : {profile_raw.get('products', [])}")
 
     # ── profile() ─────────────────────────────────────────────────────
     _section("kite.profile()")
