@@ -7,11 +7,16 @@ Field-mapping reference (verified against Zerodha KiteConnect API):
 
 holdings() response keys used here:
   tradingsymbol, exchange, isin, instrument_token
-  quantity            — free settled qty (EXCLUDES T1, auth-pending, and pledged)
+  quantity            — free/tradeable (EXCLUDES T1, auth-pending, and pledged)
   t1_quantity         — T+1 unsettled (bought today/yesterday, settling tomorrow)
   authorised_quantity — pledge initiated but CDSL depository OTP not yet done
-                        (shares are frozen/locked, NOT in quantity or used_quantity)
-  used_quantity       — pledge fully authorised, margin is live
+                        (shares frozen in this state; NOT in any other qty field)
+  collateral_quantity — pledge approved and active (Zerodha v3 canonical field)
+                        verified live: fully-pledged accounts show ONLY this field > 0
+  used_quantity       — legacy/alternative pledge field (older API or margin-in-use
+                        indicator); may be 0 even when collateral_quantity > 0
+  opening_quantity    — total at session open; stale intraday, NOT a primary ownership
+                        field — used only as last-resort fallback
   average_price       — cost basis per share
   last_price          — current LTP
   close_price         — previous session close (for day-change calc)
@@ -20,8 +25,10 @@ holdings() response keys used here:
   pnl                 — broker-computed unrealized P&L
   collateral_type     — "margin" if pledged, "" otherwise
 
-  TOTAL OWNED = quantity + t1_quantity + authorised_quantity + used_quantity
-  Missing authorised_quantity causes mid-pledge holdings to show zero quantity.
+  TOTAL OWNED = quantity + t1_quantity + authorised_quantity
+                + max(collateral_quantity, used_quantity)
+  max() prevents double-counting: collateral_quantity is total pledged;
+  used_quantity may be a subset (active margin) or an older alias.
 
 positions() response keys used here (net positions):
   tradingsymbol, exchange, product, instrument_type
@@ -191,37 +198,63 @@ class ZerodhaAdapter(BrokerAdapter):
             logger.error("get_holdings failed for '%s': %s", account_id, exc)
             return []
 
-        # Permanent marker — visible in logs on every real call.
-        # If you see "v4-field" in logs the new code is active.
-        # If you see nothing, the process is running stale bytecode.
+        # Permanent marker — confirms the active code version in server logs.
+        # "v5-field" means: free+t1+auth+max(collateral,used)+opening_fallback
         logger.info(
-            "get_holdings '%s': %d raw rows [qty-formula=v4-field: "
-            "free+t1+auth+pledged]",
+            "get_holdings '%s': %d raw rows [qty-formula=v5-field: "
+            "free+t1+auth+max(collat,used)+opening_fallback]",
             account_id, len(raw),
         )
 
         holdings: List[Holding] = []
         for r in raw:
-            # ── Quantity: the Zerodha pledge lifecycle has four states ─
+            # ── Ownership quantity — five distinct API states ──────────
             #
-            # quantity           = free settled shares (can sell today)
-            # t1_quantity        = recently purchased, T+1 settlement pending
-            # authorised_quantity= pledge initiated but CDSL OTP not yet done
-            # used_quantity      = pledge fully authorised, margin is live
+            # quantity            = free/tradeable (can sell today)
+            # t1_quantity         = T+1 pending settlement
+            # authorised_quantity = pledge initiated, CDSL OTP not done yet
+            # collateral_quantity = pledge approved and active  ← verified
+            #                       live: fully-pledged accounts ONLY have
+            #                       this field > 0 (v3 canonical field)
+            # used_quantity       = legacy/older pledge field OR active-margin
+            #                       indicator; may be 0 even when pledged
             #
-            # All four belong to the user and must be included in portfolio
-            # valuation.  Omitting authorised_quantity causes holdings that
-            # are mid-pledge-authorisation to silently drop from net worth.
-            free_qty   = int(r.get("quantity", 0)            or 0)
-            t1_qty     = int(r.get("t1_quantity", 0)         or 0)
-            auth_qty   = int(r.get("authorised_quantity", 0) or 0)
-            pledged_qty= int(r.get("used_quantity", 0)       or 0)
-            total_qty  = free_qty + t1_qty + auth_qty + pledged_qty
+            # max(collateral_quantity, used_quantity) prevents double-counting:
+            # they may represent the same concept in different API versions,
+            # or collateral may be the total while used is a current-usage
+            # subset (e.g. collateral=100, used=50 for 100 pledged shares
+            # with 50 shares' margin currently drawn against open F&O).
+            #
+            # opening_quantity is the balance at session open — stale intraday,
+            # used only as a last-resort fallback to avoid hard-zeroing a
+            # holding whose other fields are all temporarily zero.
+            free_qty    = int(r.get("quantity", 0)            or 0)
+            t1_qty      = int(r.get("t1_quantity", 0)         or 0)
+            auth_qty    = int(r.get("authorised_quantity", 0) or 0)
+            collat_qty  = int(r.get("collateral_quantity", 0) or 0)
+            used_qty    = int(r.get("used_quantity", 0)       or 0)
+            pledged_qty = max(collat_qty, used_qty)
+            total_qty   = free_qty + t1_qty + auth_qty + pledged_qty
+
+            # Last-resort fallback: opening_quantity captures transient API
+            # states not covered by the explicit fields above.
+            if total_qty <= 0:
+                opening_qty = int(r.get("opening_quantity", 0) or 0)
+                if opening_qty > 0:
+                    total_qty = opening_qty
+                    logger.warning(
+                        "Holding %s: all primary qty fields=0, "
+                        "using opening_quantity=%d as fallback",
+                        r.get("tradingsymbol"), opening_qty,
+                    )
 
             if total_qty <= 0:
                 logger.debug(
-                    "Skipping %s: free=%d t1=%d auth=%d pledged=%d (all zero)",
-                    r.get("tradingsymbol"), free_qty, t1_qty, auth_qty, pledged_qty,
+                    "Skipping %s: free=%d t1=%d auth=%d collat=%d used=%d "
+                    "opening=%d — all zero",
+                    r.get("tradingsymbol"),
+                    free_qty, t1_qty, auth_qty, collat_qty, used_qty,
+                    int(r.get("opening_quantity", 0) or 0),
                 )
                 continue
 
@@ -239,7 +272,7 @@ class ZerodhaAdapter(BrokerAdapter):
                 if close_price > 0:
                     day_change_pct = round((day_change / close_price) * 100, 2)
 
-            is_pledged      = bool(auth_qty > 0 or pledged_qty > 0)
+            is_pledged      = bool(auth_qty > 0 or collat_qty > 0 or used_qty > 0)
             collateral_type = r.get("collateral_type", "")
 
             h = Holding(
@@ -259,11 +292,12 @@ class ZerodhaAdapter(BrokerAdapter):
             h.day_change_pct = day_change_pct  # %
 
             logger.debug(
-                "Holding: %s total=%d (free=%d t1=%d auth=%d pledged=%d) "
-                "avg=%.2f ltp=%.2f day_chg=%.2f pnl=%.2f pledged=%s",
+                "Holding: %s total=%d "
+                "(free=%d t1=%d auth=%d collat=%d used=%d max_pledged=%d) "
+                "avg=%.2f ltp=%.2f day_chg=%.2f pnl=%.2f ctype=%s",
                 r.get("tradingsymbol"), total_qty,
-                free_qty, t1_qty, auth_qty, pledged_qty,
-                avg_price, last_price, day_change, h.pnl, collateral_type or "no",
+                free_qty, t1_qty, auth_qty, collat_qty, used_qty, pledged_qty,
+                avg_price, last_price, day_change, h.pnl, collateral_type or "none",
             )
             holdings.append(h)
 

@@ -76,17 +76,22 @@ else:
     if "auth_qty" in src_text:
         ok("Source contains 'auth_qty' variable")
     else:
-        fail("Source does NOT contain 'auth_qty' — old code path")
+        fail("Source does NOT contain 'auth_qty'")
 
-    # Count quantity fields in the formula line
+    if "collat_qty" in src_text or "collateral_quantity" in src_text:
+        ok("Source contains 'collateral_quantity' — v5 formula is present")
+    else:
+        fail("Source does NOT contain 'collateral_quantity' — v5 formula is missing")
+
+    # Check the total_qty formula line
     formula_lines = [l.strip() for l in src_text.splitlines()
-                     if "total_qty" in l and ("free_qty" in l or "auth_qty" in l or "t1_qty" in l)]
+                     if "total_qty" in l and ("free_qty" in l or "pledged_qty" in l)]
     if formula_lines:
         info(f"total_qty formula: {formula_lines[0]}")
-        if "auth_qty" in formula_lines[0]:
-            ok("Formula includes auth_qty (4-field formula)")
+        if "pledged_qty" in formula_lines[0]:
+            ok("Formula uses pledged_qty = max(collat, used)")
         else:
-            fail("Formula does NOT include auth_qty (old 3-field formula still in source)")
+            fail("Formula does not include pledged_qty — old formula still active")
 
 
 # ── 2. Pyc cache vs source ────────────────────────────────────────────
@@ -203,17 +208,17 @@ try:
     # Inspect the actual source code of the loaded class
     try:
         loaded_src = inspect.getsource(ZerodhaAdapter.get_holdings)
-        if "authorised_quantity" in loaded_src:
-            ok("Loaded get_holdings() source contains 'authorised_quantity'")
-            for i, line in enumerate(loaded_src.splitlines(), 1):
-                if "authorised_quantity" in line or "total_qty" in line:
-                    info(f"  line {i:3d}: {line.rstrip()}")
+        has_v5 = "collateral_quantity" in loaded_src and "max(collat_qty" in loaded_src
+        has_v4 = "authorised_quantity" in loaded_src
+        if has_v5:
+            ok("Loaded get_holdings() contains collateral_quantity + max() — v5 formula")
+        elif has_v4:
+            fail("Loaded get_holdings() has v4 formula (auth only) — missing collateral_quantity")
         else:
-            fail(
-                "Loaded get_holdings() does NOT contain 'authorised_quantity' — "
-                "the old version is loaded in memory"
-            )
-            info("This means Python imported a stale .pyc or a different file.")
+            fail("Loaded get_holdings() is the OLD version — no collateral or auth fields")
+        for i, line in enumerate(loaded_src.splitlines(), 1):
+            if any(k in line for k in ("collateral_quantity", "total_qty", "pledged_qty", "v5-field")):
+                info(f"  line {i:3d}: {line.rstrip()}")
     except Exception as e:
         warn(f"Could not inspect loaded source: {e}")
 

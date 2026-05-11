@@ -89,21 +89,28 @@ for account_id in active_ids:
             ms = (time.monotonic() - t0) * 1000
             print(f"  API returned {len(raw_holdings)} rows in {ms:.0f} ms")
             for r in raw_holdings[:5]:
-                sym   = r.get("tradingsymbol", "?")
-                qty   = r.get("quantity", "?")
-                t1    = r.get("t1_quantity", "?")
-                auth  = r.get("authorised_quantity", "?")   # pledged, CDSL OTP pending
-                used  = r.get("used_quantity", "?")         # pledged, authorised
-                lp    = r.get("last_price", "?")
-                avg   = r.get("average_price", "?")
-                pnl   = r.get("pnl", "?")
+                sym    = r.get("tradingsymbol", "?")
+                qty    = r.get("quantity", "?")
+                t1     = r.get("t1_quantity", "?")
+                auth   = r.get("authorised_quantity", "?")   # pledge pending CDSL OTP
+                collat = r.get("collateral_quantity", "?")   # pledge approved (v3 canonical)
+                used   = r.get("used_quantity", "?")         # legacy/margin-in-use field
+                opn    = r.get("opening_quantity", "?")      # session-open balance
+                lp     = r.get("last_price", "?")
+                avg    = r.get("average_price", "?")
+                pnl    = r.get("pnl", "?")
                 try:
-                    total = (int(qty or 0) + int(t1 or 0)
-                             + int(auth or 0) + int(used or 0))
+                    _col   = int(collat or 0)
+                    _used  = int(used   or 0)
+                    total  = (int(qty  or 0) + int(t1   or 0)
+                              + int(auth or 0) + max(_col, _used))
+                    if total == 0:
+                        total = int(opn or 0)  # opening_quantity fallback
                 except Exception:
                     total = "?"
                 print(
-                    f"    {sym:<20} qty={qty} t1={t1} auth={auth} used={used} "
+                    f"    {sym:<20} qty={qty} t1={t1} auth={auth} "
+                    f"collat={collat} used={used} open={opn} "
                     f"TOTAL={total}  lp={lp}  avg={avg}  pnl={pnl}"
                 )
             if len(raw_holdings) > 5:
