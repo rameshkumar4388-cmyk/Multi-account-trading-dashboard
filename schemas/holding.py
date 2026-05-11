@@ -30,14 +30,25 @@ class Holding:
         if not self.tradingsymbol:
             self.tradingsymbol = self.symbol
         self.invested_value = round(self.quantity * self.avg_price, 2)
-        self._recompute(self.ltp)
+
+        if self.ltp > 0:
+            # Live price available — compute at market value
+            self._recompute(self.ltp)
+        else:
+            # No LTP yet (pre-market, halted, feed not started).
+            # Show at cost basis so net_worth is non-zero until prices arrive.
+            self.current_value = self.invested_value
+            # pnl / pnl_pct stay 0 — correct, we genuinely don't know the gain
 
     def _recompute(self, ltp: float):
         if ltp > 0:
             self.ltp = ltp
             self.current_value = round(self.quantity * ltp, 2)
             self.pnl = round(self.current_value - self.invested_value, 2)
-            self.pnl_pct = round((self.pnl / self.invested_value) * 100, 2) if self.invested_value else 0.0
+            self.pnl_pct = (
+                round((self.pnl / self.invested_value) * 100, 2)
+                if self.invested_value else 0.0
+            )
 
     def update_ltp(self, ltp: float):
         self._recompute(ltp)

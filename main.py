@@ -158,6 +158,10 @@ def main():
         from ui.pages.auth_page import render
         render(account_svc, settings, portfolio_svc)
 
+    elif view == "debug":
+        from ui.pages.debug_page import render
+        render(account_svc, portfolio_svc, aggregation_svc, md_svc, settings)
+
     # ── Auto-refresh ──────────────────────────────────────────────────
     try:
         from streamlit_autorefresh import st_autorefresh

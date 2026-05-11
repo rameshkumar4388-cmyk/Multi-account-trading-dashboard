@@ -57,13 +57,18 @@ class PortfolioService:
         if force_refresh or self._is_stale(self._holdings_cache, account_id):
             self._refresh_holdings(account_id)
         data, _ = self._holdings_cache.get(account_id, ([], 0.0))
-        return self._inject_ltp_holdings(list(data))   # work on a copy
+        # Deep-copy so LTP injection never mutates the cached Holding objects.
+        # Without this, repeated calls within the TTL window would corrupt day_change
+        # by overwriting it with quote-feed values on every render.
+        import copy
+        return self._inject_ltp_holdings([copy.copy(h) for h in data])
 
     def get_positions(self, account_id: str, force_refresh: bool = False) -> List[Position]:
         if force_refresh or self._is_stale(self._positions_cache, account_id):
             self._refresh_positions(account_id)
         data, _ = self._positions_cache.get(account_id, ([], 0.0))
-        return self._inject_ltp_positions(list(data))
+        import copy
+        return self._inject_ltp_positions([copy.copy(p) for p in data])
 
     def get_margin(self, account_id: str, force_refresh: bool = False) -> Optional[MarginInfo]:
         if force_refresh or self._is_stale(self._margin_cache, account_id):

@@ -17,6 +17,7 @@ _PAGES = {
     "account":   ("👤",  "Account View"),
     "holdings":  ("📁",  "Holdings"),
     "auth":      ("🔑",  "Reconnect / Auth"),
+    "debug":     ("🔬",  "Debug Trace"),
 }
 
 

@@ -59,14 +59,16 @@ def render(aggregation: AggregationService, md_service=None):
     account_data = aggregation.get_account_breakdown()
 
     # ── 1. LIVE MTM BANNER ────────────────────────────────────────────
-    total_pnl = metrics.get("total_pnl", 0)
-    day_pnl   = metrics.get("day_pnl", 0)
-    pos_pnl   = metrics.get("positions_pnl", 0)
-    hold_pnl  = metrics.get("holdings_pnl", 0)
-    net_worth = metrics.get("net_worth", 0)
-    cash      = metrics.get("available_cash", 0)
-    margin    = metrics.get("used_margin", 0)
-    hold_pct  = metrics.get("holdings_pnl_pct", 0)
+    total_pnl     = metrics.get("total_pnl", 0)
+    day_pnl       = metrics.get("day_pnl", 0)
+    pos_pnl       = metrics.get("positions_pnl", 0)
+    hold_pnl      = metrics.get("holdings_pnl", 0)
+    net_worth     = metrics.get("net_worth", 0)
+    net_available = metrics.get("net_available", metrics.get("available_cash", 0))
+    cash          = metrics.get("available_cash", 0)
+    margin        = metrics.get("used_margin", 0)
+    collateral    = metrics.get("total_collateral", 0)
+    hold_pct      = metrics.get("holdings_pnl_pct", 0)
 
     banner_color = "#3fb950" if total_pnl >= 0 else "#f85149"
 
@@ -76,7 +78,7 @@ def render(aggregation: AggregationService, md_service=None):
         _pnl_html("Positions P&L", pos_pnl) + _sep() +
         _pnl_html("Holdings P&L", hold_pnl, format_pct(hold_pct)) + _sep() +
         _stat_html("Net Worth", format_inr(net_worth), "#58a6ff") + _sep() +
-        _stat_html("Cash", format_inr(cash), "#c9d1d9") + _sep() +
+        _stat_html("Available", format_inr(net_available), "#c9d1d9") + _sep() +
         _stat_html("Margin Used", format_inr(margin), "#f0883e")
     )
     banner = (
@@ -215,12 +217,12 @@ def _render_margin_bars(account_data: list):
         unsafe_allow_html=True,
     )
     for d in account_data:
-        used  = d.get("used_margin", 0)
-        cash  = d.get("available_cash", 0)
-        total = used + cash
-        pct   = (used / total * 100) if total > 0 else 0.0
-        bar_c = "#f85149" if pct > 75 else ("#f0883e" if pct > 50 else "#3fb950")
-        name  = d.get("display_name", d.get("account_id", ""))
+        used          = d.get("used_margin", 0)
+        net_available = d.get("net_available", d.get("available_cash", 0))
+        total         = used + net_available
+        pct           = (used / total * 100) if total > 0 else 0.0
+        bar_c         = "#f85149" if pct > 75 else ("#f0883e" if pct > 50 else "#3fb950")
+        name          = d.get("display_name", d.get("account_id", ""))
         html = (
             f"<div style='margin-bottom:10px;'>"
             f"<div style='display:flex;justify-content:space-between;font-size:0.72rem;"
@@ -231,7 +233,7 @@ def _render_margin_bars(account_data: list):
             f"<div style='background:{bar_c};width:{min(pct,100):.0f}%;height:100%;border-radius:3px;'></div></div>"
             f"<div style='display:flex;justify-content:space-between;font-size:0.68rem;"
             f"color:#6e7681;margin-top:2px;'>"
-            f"<span>Used: {format_inr(used)}</span><span>Free: {format_inr(cash)}</span></div></div>"
+            f"<span>Used: {format_inr(used)}</span><span>Avail: {format_inr(net_available)}</span></div></div>"
         )
         st.markdown(html, unsafe_allow_html=True)
 

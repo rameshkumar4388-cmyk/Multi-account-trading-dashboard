@@ -201,15 +201,17 @@ class AggregationService:
             cfg = self._accounts._account_configs.get(s.account_id)
             broker = cfg.metadata.get("original_broker", s.broker) if cfg else s.broker
             result.append({
-                "account_id": s.account_id,
-                "display_name": s.display_name,
-                "broker": broker.capitalize(),
-                "net_worth": s.net_worth,
-                "holdings_value": s.total_holdings_value,
-                "holdings_pnl": s.holdings_pnl,
-                "positions_pnl": s.positions_pnl,
-                "day_pnl": s.day_pnl,
-                "available_cash": s.available_cash,
-                "used_margin": s.used_margin,
+                "account_id":      s.account_id,
+                "display_name":    s.display_name,
+                "broker":          broker.capitalize(),
+                "net_worth":       s.net_worth,
+                "holdings_value":  s.total_holdings_value,
+                "holdings_pnl":    s.holdings_pnl,
+                "positions_pnl":   s.positions_pnl,
+                "day_pnl":         s.day_pnl,
+                "available_cash":  s.available_cash,   # pure cash balance
+                "net_available":   s.net_available,    # cash + collateral − used
+                "used_margin":     s.used_margin,
+                "total_collateral":s.total_collateral,
             })
         return result

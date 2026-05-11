@@ -31,8 +31,10 @@ def render_account_pnl_cards(summaries: List[AccountSummary], account_configs: d
         day_sign = "+" if s.day_pnl >= 0 else ""
         mtm_sign = "+" if s.total_pnl >= 0 else ""
 
-        total_margin = s.used_margin + s.available_cash
-        margin_pct = (s.used_margin / total_margin * 100) if total_margin > 0 else 0.0
+        # Total margin capacity = already used + still available for trading
+        # net_available already accounts for collateral; use it, not raw cash
+        total_capacity = s.used_margin + s.net_available
+        margin_pct = (s.used_margin / total_capacity * 100) if total_capacity > 0 else 0.0
         margin_bar_color = "#f85149" if margin_pct > 75 else ("#f0883e" if margin_pct > 50 else "#3fb950")
         margin_bar_width = min(margin_pct, 100)
         acct_label = s.account_id.upper().replace("_", " ")
@@ -68,7 +70,7 @@ def render_account_pnl_cards(summaries: List[AccountSummary], account_configs: d
 <div style="background:#21262d;border-radius:3px;height:4px;">
 <div style="background:{margin_bar_color};width:{margin_bar_width:.0f}%;height:100%;border-radius:3px;"></div>
 </div>
-<div style="font-size:0.62rem;color:#6e7681;margin-top:2px;">Cash: {format_inr(s.available_cash)}</div>
+<div style="font-size:0.62rem;color:#6e7681;margin-top:2px;">Avail: {format_inr(s.net_available)} &nbsp;·&nbsp; Cash: {format_inr(s.available_cash)}</div>
 </div>
 </div>
         """).strip()
