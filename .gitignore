@@ -37,3 +37,7 @@ Thumbs.db
 .idea/
 *.swp
 .env
+
+# API inspection outputs (contain live account data — never commit)
+debug_api/*.json
+debug_api/*.txt
