@@ -7,16 +7,21 @@ Field-mapping reference (verified against Zerodha KiteConnect API):
 
 holdings() response keys used here:
   tradingsymbol, exchange, isin, instrument_token
-  quantity          — free settled quantity (EXCLUDES T1 and pledged)
-  t1_quantity       — T+1 unsettled purchases (bought today/yesterday)
-  used_quantity     — shares pledged for margin collateral
-  average_price     — cost basis per share
-  last_price        — current LTP
-  close_price       — previous session close (for day-change calc)
-  day_change        — per-share price change vs. close_price
+  quantity            — free settled qty (EXCLUDES T1, auth-pending, and pledged)
+  t1_quantity         — T+1 unsettled (bought today/yesterday, settling tomorrow)
+  authorised_quantity — pledge initiated but CDSL depository OTP not yet done
+                        (shares are frozen/locked, NOT in quantity or used_quantity)
+  used_quantity       — pledge fully authorised, margin is live
+  average_price       — cost basis per share
+  last_price          — current LTP
+  close_price         — previous session close (for day-change calc)
+  day_change          — per-share price change vs. close_price
   day_change_percentage
-  pnl               — broker-computed unrealized P&L
-  collateral_type   — "margin" if pledged, "" otherwise
+  pnl                 — broker-computed unrealized P&L
+  collateral_type     — "margin" if pledged, "" otherwise
+
+  TOTAL OWNED = quantity + t1_quantity + authorised_quantity + used_quantity
+  Missing authorised_quantity causes mid-pledge holdings to show zero quantity.
 
 positions() response keys used here (net positions):
   tradingsymbol, exchange, product, instrument_type
@@ -192,19 +197,26 @@ class ZerodhaAdapter(BrokerAdapter):
 
         holdings: List[Holding] = []
         for r in raw:
-            # ── Quantity: include T+1 and pledged shares ──────────────
-            # quantity    = free settled quantity
-            # t1_quantity = T+1 (purchased yesterday / today, pending settlement)
-            # used_quantity = pledged for margin
-            free_qty    = int(r.get("quantity", 0))
-            t1_qty      = int(r.get("t1_quantity", 0))
-            pledged_qty = int(r.get("used_quantity", 0))
-            total_qty   = free_qty + t1_qty + pledged_qty
+            # ── Quantity: the Zerodha pledge lifecycle has four states ─
+            #
+            # quantity           = free settled shares (can sell today)
+            # t1_quantity        = recently purchased, T+1 settlement pending
+            # authorised_quantity= pledge initiated but CDSL OTP not yet done
+            # used_quantity      = pledge fully authorised, margin is live
+            #
+            # All four belong to the user and must be included in portfolio
+            # valuation.  Omitting authorised_quantity causes holdings that
+            # are mid-pledge-authorisation to silently drop from net worth.
+            free_qty   = int(r.get("quantity", 0)            or 0)
+            t1_qty     = int(r.get("t1_quantity", 0)         or 0)
+            auth_qty   = int(r.get("authorised_quantity", 0) or 0)
+            pledged_qty= int(r.get("used_quantity", 0)       or 0)
+            total_qty  = free_qty + t1_qty + auth_qty + pledged_qty
 
             if total_qty <= 0:
                 logger.debug(
-                    "Skipping %s: free=%d t1=%d pledged=%d",
-                    r.get("tradingsymbol"), free_qty, t1_qty, pledged_qty,
+                    "Skipping %s: free=%d t1=%d auth=%d pledged=%d (all zero)",
+                    r.get("tradingsymbol"), free_qty, t1_qty, auth_qty, pledged_qty,
                 )
                 continue
 
@@ -222,7 +234,7 @@ class ZerodhaAdapter(BrokerAdapter):
                 if close_price > 0:
                     day_change_pct = round((day_change / close_price) * 100, 2)
 
-            is_pledged  = bool(pledged_qty > 0)
+            is_pledged      = bool(auth_qty > 0 or pledged_qty > 0)
             collateral_type = r.get("collateral_type", "")
 
             h = Holding(
@@ -242,10 +254,11 @@ class ZerodhaAdapter(BrokerAdapter):
             h.day_change_pct = day_change_pct  # %
 
             logger.debug(
-                "Holding: %s qty=%d (free=%d t1=%d pledged=%d) avg=%.2f ltp=%.2f "
-                "day_change=%.2f pnl=%.2f",
-                r.get("tradingsymbol"), total_qty, free_qty, t1_qty, pledged_qty,
-                avg_price, last_price, day_change, h.pnl,
+                "Holding: %s total=%d (free=%d t1=%d auth=%d pledged=%d) "
+                "avg=%.2f ltp=%.2f day_chg=%.2f pnl=%.2f pledged=%s",
+                r.get("tradingsymbol"), total_qty,
+                free_qty, t1_qty, auth_qty, pledged_qty,
+                avg_price, last_price, day_change, h.pnl, collateral_type or "no",
             )
             holdings.append(h)
 
