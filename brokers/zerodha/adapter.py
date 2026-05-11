@@ -191,8 +191,13 @@ class ZerodhaAdapter(BrokerAdapter):
             logger.error("get_holdings failed for '%s': %s", account_id, exc)
             return []
 
-        logger.debug(
-            "get_holdings '%s': API returned %d raw rows", account_id, len(raw)
+        # Permanent marker — visible in logs on every real call.
+        # If you see "v4-field" in logs the new code is active.
+        # If you see nothing, the process is running stale bytecode.
+        logger.info(
+            "get_holdings '%s': %d raw rows [qty-formula=v4-field: "
+            "free+t1+auth+pledged]",
+            account_id, len(raw),
         )
 
         holdings: List[Holding] = []
