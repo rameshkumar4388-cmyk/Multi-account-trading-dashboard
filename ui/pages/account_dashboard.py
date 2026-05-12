@@ -9,6 +9,7 @@ import streamlit as st
 
 from services.aggregation_service import AggregationService
 from services.portfolio_service import PortfolioService
+from ui.account_order import sort_account_ids
 from ui.components.charts import render_broker_pie, render_sector_pie
 from ui.components.holdings_table import render_holdings_table
 from ui.components.metric_cards import render_account_metrics
@@ -20,7 +21,10 @@ def render(
     portfolio: PortfolioService,
     selected_account: Optional[str] = None,
 ):
-    account_ids = aggregation._accounts.list_account_ids()
+    account_ids = sort_account_ids(
+        aggregation._accounts.list_account_ids(),
+        aggregation._accounts._account_configs,
+    )
 
     if not selected_account:
         # Show all accounts as expandable sections

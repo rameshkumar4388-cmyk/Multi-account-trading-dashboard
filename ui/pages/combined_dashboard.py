@@ -17,6 +17,7 @@ from typing import Optional
 import streamlit as st
 
 from services.aggregation_service import AggregationService
+from ui.account_order import sort_account_ids, sort_summaries
 from ui.components.account_pnl_cards import render_account_pnl_cards
 from ui.theme import C, format_inr, format_pct, signed_color
 
@@ -332,10 +333,10 @@ def render(
     portfolio_svc=None,
 ):
     metrics    = aggregation.get_combined_metrics()
-    summaries  = aggregation.get_all_summaries()
-    positions  = aggregation.get_combined_positions()
-    active_ids = aggregation._accounts.list_account_ids()
     all_cfgs   = aggregation._accounts._account_configs
+    summaries  = sort_summaries(aggregation.get_all_summaries(), all_cfgs)
+    positions  = aggregation.get_combined_positions()
+    active_ids = sort_account_ids(aggregation._accounts.list_account_ids(), all_cfgs)
     active_cfgs = {aid: all_cfgs[aid] for aid in active_ids if aid in all_cfgs}
 
     # ── 1. Index cards (fragment-refreshed independently when possible) ─

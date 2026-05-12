@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 import streamlit as st
 
 from config.settings import AppSettings
+from ui.account_order import sort_account_ids
 
 if TYPE_CHECKING:
     from services.account_service import AccountHealth
@@ -39,7 +40,11 @@ def render_sidebar(
         (view_key, selected_account_id)
     """
     health = account_health or {}
-    all_configured = list(health.keys()) if health else account_ids
+    cfg_map = {a.account_id: a for a in settings.accounts}
+    all_configured = sort_account_ids(
+        list(health.keys()) if health else account_ids, cfg_map
+    )
+    account_ids = sort_account_ids(account_ids, cfg_map)
 
     with st.sidebar:
         # ── Brand ─────────────────────────────────────────────────────
@@ -73,8 +78,6 @@ def render_sidebar(
         # ── Account filter (context-sensitive) ────────────────────────
         view = st.session_state.active_page
         selected_account: Optional[str] = None
-
-        cfg_map = {a.account_id: a for a in settings.accounts}
 
         if account_ids and view in ("positions", "exposure", "holdings", "account"):
             st.markdown(

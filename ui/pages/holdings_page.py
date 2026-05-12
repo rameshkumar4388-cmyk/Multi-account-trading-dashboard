@@ -13,6 +13,7 @@ import streamlit as st
 
 from services.aggregation_service import AggregationService
 from services.portfolio_service import PortfolioService
+from ui.account_order import sort_account_ids
 from ui.components.charts import render_holdings_treemap, render_sector_pie
 from ui.components.holdings_table import (
     render_aggregated_holdings_table,
@@ -26,9 +27,10 @@ def render(
     portfolio: PortfolioService,
     selected_account: Optional[str] = None,
 ):
+    cfgs = aggregation._accounts._account_configs
     account_ids = (
         [selected_account] if selected_account
-        else aggregation._accounts.list_account_ids()
+        else sort_account_ids(aggregation._accounts.list_account_ids(), cfgs)
     )
 
     all_holdings = aggregation.get_combined_holdings(account_ids)

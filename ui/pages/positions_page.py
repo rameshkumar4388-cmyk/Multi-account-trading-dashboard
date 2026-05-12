@@ -20,6 +20,7 @@ import streamlit as st
 from schemas.position import Position
 from services.aggregation_service import AggregationService
 from services.portfolio_service import PortfolioService
+from ui.account_order import sort_account_ids
 from ui.theme import format_inr
 
 
@@ -161,7 +162,10 @@ def render(
     # ── FILTER BAR ────────────────────────────────────────────────────
     fc1, fc2, fc3, fc4 = st.columns(4, gap="small")
 
-    all_account_ids = aggregation._accounts.list_account_ids()
+    all_account_ids = sort_account_ids(
+        aggregation._accounts.list_account_ids(),
+        aggregation._accounts._account_configs,
+    )
     acct_labels = {
         aid: (aggregation._accounts._account_configs[aid].display_name
               if aid in aggregation._accounts._account_configs else aid)

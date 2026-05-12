@@ -9,6 +9,7 @@ import streamlit as st
 
 from services.aggregation_service import AggregationService
 from services.portfolio_service import PortfolioService
+from ui.account_order import sort_account_ids
 from ui.components.charts import render_exposure_bar
 from ui.components.exposure_panel import render_fno_summary, render_margin_usage
 
@@ -19,9 +20,11 @@ def render(
     selected_account: Optional[str] = None,
 ):
     account_ids = (
-        [selected_account]
-        if selected_account
-        else aggregation._accounts.list_account_ids()
+        [selected_account] if selected_account
+        else sort_account_ids(
+            aggregation._accounts.list_account_ids(),
+            aggregation._accounts._account_configs,
+        )
     )
 
     account_data = aggregation.get_account_breakdown(account_ids)
