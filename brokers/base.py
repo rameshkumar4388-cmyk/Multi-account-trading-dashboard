@@ -71,7 +71,7 @@ class BrokerAdapter(ABC):
         """
         symbols: List[str] = []
         for h in self.get_holdings(account_id):
-            symbols.append(f"{h.exchange}:{h.symbol}")
+            symbols.append(h.symbol)   # plain name; ZerodhaQuoteFeed._to_instrument() adds exchange prefix
         for p in self.get_positions(account_id):
-            symbols.append(f"{p.exchange}:{p.symbol}")
+            symbols.append(p.symbol)
         return list(dict.fromkeys(symbols))   # deduplicate, preserve order

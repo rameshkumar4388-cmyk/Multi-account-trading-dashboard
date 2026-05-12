@@ -261,11 +261,10 @@ class ZerodhaAdapter(BrokerAdapter):
             avg_price   = float(r.get("average_price", 0))
             last_price  = float(r.get("last_price", 0))
             close_price = float(r.get("close_price", 0))
-            # Use close_price when last_price is 0 (halted, pre-market, newly listed)
+            # Use close_price when last_price is 0 (halted, pre-market, newly listed).
+            # Note: holdings API last_price = EOD snapshot; live prices come from the
+            # quote feed via LTP injection in portfolio_service._inject_ltp_holdings().
             effective_ltp = last_price if last_price > 0 else close_price
-
-            # Broker-computed P&L — Zerodha's direct value, not reconstructed
-            broker_pnl = float(r.get("pnl", 0))
 
             # day_change from Zerodha is per-share price change vs. close_price
             day_change     = float(r.get("day_change", 0))
@@ -294,19 +293,18 @@ class ZerodhaAdapter(BrokerAdapter):
             )
             h.day_change     = day_change
             h.day_change_pct = day_change_pct
-
-            # Use broker's direct P&L (ground truth) if provided; our formula is a fallback
-            if broker_pnl:
-                h.pnl = broker_pnl
-                h.pnl_pct = round((broker_pnl / h.invested_value) * 100, 2) if h.invested_value else 0.0
+            # pnl is computed by Holding.__post_init__ as qty × (ltp − avg_price).
+            # The quote feed will inject live LTP via _inject_ltp_holdings() which
+            # calls h.update_ltp(live_ltp) → pnl = qty × (live_ltp − avg_price).
+            # Do NOT override with the API pnl field — it uses EOD close prices.
 
             logger.debug(
                 "Holding: %s total=%d "
                 "(free=%d t1=%d auth=%d collat=%d) "
-                "avg=%.2f ltp=%.2f broker_pnl=%.2f computed_pnl=%.2f",
+                "avg=%.2f ltp=%.2f pnl=%.2f",
                 r.get("tradingsymbol"), total_qty,
                 free_qty, t1_qty, auth_qty, collat_qty,
-                avg_price, effective_ltp, broker_pnl, h.pnl,
+                avg_price, effective_ltp, h.pnl,
             )
             holdings.append(h)
 
