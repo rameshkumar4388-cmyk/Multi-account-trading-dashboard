@@ -85,7 +85,7 @@ def _load_accounts_from_env() -> List[AccountConfig]:
         api_secret   = os.getenv(f"{prefix}_API_SECRET", "").strip()
         access_token = os.getenv(f"{prefix}_ACCESS_TOKEN", "").strip()
         user_id      = os.getenv(f"{prefix}_USER_ID", "").strip()
-        display_name = os.getenv(f"{prefix}_DISPLAY_NAME", f"Zerodha {tag}").strip()
+        display_name = os.getenv(f"{prefix}_DISPLAY_NAME", f"Zerodha ({tag})").strip()
 
         # Validate required fields
         missing: List[str] = []
@@ -164,7 +164,7 @@ def _load_kite_single_account_from_env() -> List[AccountConfig]:
     Also accepts ZERODHA_API_KEY / ZERODHA_ACCESS_TOKEN (no tag) as aliases.
     """
     for prefix, acct_id, default_name in [
-        ("KITE",    "zerodha_kite",    "Zerodha (Kite)"),
+        ("KITE",    "zerodha_kite",    "Zerodha"),
         ("ZERODHA", "zerodha_primary", "Zerodha"),
     ]:
         api_key      = os.getenv(f"{prefix}_API_KEY", "").strip()

@@ -32,11 +32,21 @@ html, body, [class*="css"] {{
     -webkit-font-smoothing: antialiased;
 }}
 
-/* ── Hide Streamlit's default header bar completely ─────────────── */
+/* ── Hide Streamlit header visually but preserve sidebar toggle ─── */
 [data-testid="stHeader"],
 header[data-testid="stHeader"] {{
-    display: none !important;
     height: 0 !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+}}
+/* Sidebar expand button must stay accessible when sidebar is collapsed */
+[data-testid="collapsedControl"] {{
+    display: flex !important;
+    visibility: visible !important;
+    z-index: 999999 !important;
 }}
 /* Remove the top padding that was reserved for the header */
 .stApp > .main > .block-container,

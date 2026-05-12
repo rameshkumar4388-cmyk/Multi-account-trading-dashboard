@@ -101,12 +101,13 @@ class PortfolioService:
         used_margin      = margin.used_margin      if margin else 0.0
         total_collateral = margin.total_collateral if margin else 0.0
 
-        cfg          = self._accounts._account_configs.get(account_id)
-        display_name = cfg.display_name if cfg else info.display_name
+        cfg = self._accounts._account_configs.get(account_id)
+        # info.display_name is "Zerodha (SP7086)" — derived from API profile at auth time.
+        # cfg.display_name is also updated after auth; use info as primary source.
+        display_name = (info.display_name if info else None) or (cfg.display_name if cfg else account_id)
 
-        # net_worth = holdings at market price + pure cash
-        # (pledged holdings are already in total_holdings_value; collateral is NOT extra wealth)
-        net_worth = round(total_holdings_value + available_cash, 2)
+        # Net worth = holdings market value + cash + open positions MTM P&L
+        net_worth = round(total_holdings_value + available_cash + positions_pnl, 2)
 
         logger.debug(
             "AccountSummary '%s': %d holdings val=%.2f pnl=%.2f | "

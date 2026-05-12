@@ -62,7 +62,7 @@ class AccountSummary:
     holdings_day_pnl: float = 0.0      # holdings-only day movement (for spec metric 2)
     day_pnl_pct: float = 0.0
     # Totals
-    net_worth: float = 0.0             # Holdings value + cash (collateral not double-counted)
+    net_worth: float = 0.0             # Holdings value + cash + positions MTM P&L
     timestamp: datetime = field(default_factory=datetime.now)
 
     @property

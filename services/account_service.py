@@ -140,6 +140,14 @@ class AccountService:
                 self._adapters[cfg.account_id] = adapter
                 health.status = "active"
                 health.authenticated_at = datetime.now()
+                # Update display name and user_id from API profile (e.g. "Zerodha (SP7086)").
+                # Profile is already cached in the adapter from the auth call — no extra round-trip.
+                info = adapter.get_account_info(cfg.account_id)
+                if info and info.display_name:
+                    health.display_name = info.display_name
+                    cfg.display_name    = info.display_name
+                if info and info.user_id and not cfg.credentials.get("user_id"):
+                    cfg.credentials["user_id"] = info.user_id
                 logger.info("Account '%s' (%s) authenticated", cfg.account_id, cfg.display_name)
             else:
                 health.error = (

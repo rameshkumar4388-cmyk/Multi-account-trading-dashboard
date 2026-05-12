@@ -120,15 +120,15 @@ def _render_summary_bar(metrics: dict):
     holdings_day = metrics.get("holdings_day_pnl", 0)
     hold_pnl     = metrics.get("holdings_pnl", 0)
     hold_pct     = metrics.get("holdings_pnl_pct", 0)
-    net_worth    = metrics.get("net_worth", 0) + pos_pnl  # per spec: + positions_pnl
-    cash_avail   = metrics.get("net_available", metrics.get("available_cash", 0))
+    net_worth    = metrics.get("net_worth", 0)  # already includes positions_pnl
+    cash_avail   = metrics.get("available_cash", 0)
 
     inner = (
         _pnl_cell("MTM Positions P&L", pos_pnl) + _vdiv() +
         _pnl_cell("Day P&L (Holdings)", holdings_day) + _vdiv() +
         _pnl_cell("Holdings P&L", hold_pnl, format_pct(hold_pct)) + _vdiv() +
         _stat_cell("Net Worth", format_inr(net_worth), "#a78bfa") + _vdiv() +
-        _stat_cell("Cash + Collateral", format_inr(cash_avail), C["text_2"])
+        _stat_cell("Cash", format_inr(cash_avail), C["text_2"])
     )
     bc = signed_color(pos_pnl + hold_pnl)
     st.markdown(
@@ -143,14 +143,14 @@ def _render_summary_bar(metrics: dict):
 
 # ── underlying chips ──────────────────────────────────────────────────
 
-def _render_underlying_section(positions, active_cfgs: dict, md_service):
+def _render_underlying_section(positions, active_cfgs: dict, md_service=None):
+    if not active_cfgs:
+        return
+
     by_account: dict = defaultdict(list)
     for p in positions:
         if p.quantity != 0:
             by_account[p.account_id].append(p)
-
-    if not active_cfgs:
-        return
 
     st.markdown(
         f"<div style='font-size:0.58rem;color:{C['text_3']};font-weight:700;"
@@ -171,19 +171,18 @@ def _render_underlying_section(positions, active_cfgs: dict, md_service):
 
         account_pos = by_account.get(account_id, [])
 
-        # Extract clean underlying names — filter out contract symbols (have digits)
+        # Deduplicate underlying names; filter out full contract symbols (contain digits)
         seen_underlyings: list = []
         for p in account_pos:
             cand = p.underlying or p.symbol
-            # Only include if it looks like an underlying (letters only, no digits/expiry)
             if cand and _UNDERLYING_RE.match(cand) and cand not in seen_underlyings:
                 seen_underlyings.append(cand)
 
         if seen_underlyings:
             chips_html = ""
             for sym in seen_underlyings:
-                ltp   = md_service.get_ltp(sym) or 0.0
-                chg   = md_service.get_change(sym) or 0.0
+                ltp   = (md_service.get_ltp(sym) or 0.0) if md_service else 0.0
+                chg   = (md_service.get_change(sym) or 0.0) if md_service else 0.0
                 color = C["positive"] if chg >= 0 else C["negative"]
                 ltp_s = f"{ltp:,.0f}" if ltp > 0 else "—"
                 chips_html += (
@@ -198,7 +197,7 @@ def _render_underlying_section(positions, active_cfgs: dict, md_service):
                 )
         else:
             chips_html = (
-                f"<span style='font-size:0.7rem;color:{C['text_3']};font-style:italic;'>NIL</span>"
+                f"<span style='font-size:0.7rem;color:{C['text_3']};font-style:italic;'>No open positions</span>"
             )
 
         card = (
@@ -352,9 +351,8 @@ def render(
     st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
 
     # ── 4. Active underlyings (per account, underlying name only) ──────
-    if md_service:
-        _render_underlying_section(positions, active_cfgs, md_service)
-        st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
+    _render_underlying_section(positions, active_cfgs, md_service)
+    st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
 
     # ── 5. Positions table ─────────────────────────────────────────────
     _render_positions_table(positions, aggregation)

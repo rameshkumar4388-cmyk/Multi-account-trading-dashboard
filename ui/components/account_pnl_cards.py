@@ -68,16 +68,14 @@ def render_account_pnl_cards(summaries: List[AccountSummary], account_configs: d
                          or cfg.owner or s.account_id.upper())
         client_id = client_id.upper().replace("_", " ") if client_id else s.account_id.upper()
 
-        # Net worth per spec = holdings_value + cash + positions_pnl
-        card_net_worth = (
-            s.total_holdings_value + s.available_cash + s.positions_pnl
-        )
+        # Net worth = holdings value + cash + positions MTM P&L
+        card_net_worth = s.net_worth  # adapter now computes this correctly
 
-        # Margin bar
-        total_capacity = s.used_margin + s.net_available
-        margin_pct     = (s.used_margin / total_capacity * 100) if total_capacity > 0 else 0.0
-        margin_pct     = min(margin_pct, 100)
-        bar_color      = C["negative"] if margin_pct > 75 else (C["warning"] if margin_pct > 50 else C["positive"])
+        # Margin bar: used / (cash + collateral)
+        gross_available = s.available_cash + s.total_collateral
+        margin_pct      = (s.used_margin / gross_available * 100) if gross_available > 0 else 0.0
+        margin_pct      = min(margin_pct, 100)
+        bar_color       = C["negative"] if margin_pct > 75 else (C["warning"] if margin_pct > 50 else C["positive"])
 
         # Build inner content
         inner = (
@@ -87,11 +85,10 @@ def render_account_pnl_cards(summaries: List[AccountSummary], account_configs: d
             + _metric_row("Day P&L (Holdings)", s.holdings_day_pnl, size="md")
             # ── Divider ──
             + "<div style='border-top:1px solid #1c1f3a;margin:6px 0;'></div>"
-            # ── Margin Available ──
-            + _neutral_row(
-                "Margin Available",
-                format_inr(s.net_available),
-            )
+            # ── Cash ──
+            + _neutral_row("Cash", format_inr(s.available_cash))
+            # ── Collateral ──
+            + _neutral_row("Collateral Margin", format_inr(s.total_collateral))
             # ── Used Margin + bar ──
             + f"<div style='padding:5px 0;margin-bottom:4px;'>"
             + f"<div style='display:flex;justify-content:space-between;"
