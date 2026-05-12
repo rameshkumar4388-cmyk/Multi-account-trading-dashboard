@@ -326,17 +326,22 @@ class ZerodhaAdapter(BrokerAdapter):
         holdings: List[Holding] = []
 
         for r in raw:
-            # KiteConnect mf_holdings() returns quantity = free units only;
-            # pledged units are in a separate field.  Log the raw row on first
-            # run so we can verify field names against the live payload.
-            logger.debug("MF raw row: %s", {k: v for k, v in r.items()
-                                             if k in ("tradingsymbol", "fund", "quantity",
-                                                      "pledged_quantity", "t1_quantity",
-                                                      "average_price", "last_price", "pnl")})
-            free_qty    = float(r.get("quantity", 0)           or 0)
-            pledged_qty = float(r.get("pledged_quantity", 0)   or 0)
-            t1_qty      = float(r.get("t1_quantity", 0)        or 0)
-            total_qty   = free_qty + pledged_qty + t1_qty
+            # Log the full raw row so the debug page can show exact field semantics
+            logger.info(
+                "MF raw row [%s]: quantity=%.4f pledged_quantity=%.4f t1_quantity=%.4f "
+                "average_price=%.4f last_price=%.4f pnl=%.2f",
+                r.get("tradingsymbol", r.get("fund", "?")),
+                float(r.get("quantity", 0) or 0),
+                float(r.get("pledged_quantity", 0) or 0),
+                float(r.get("t1_quantity", 0) or 0),
+                float(r.get("average_price", 0) or 0),
+                float(r.get("last_price", 0) or 0),
+                float(r.get("pnl", 0) or 0),
+            )
+            # quantity in mf_holdings() = TOTAL units (free + pledged combined).
+            # pledged_quantity is a SUBSET of quantity, NOT additional units.
+            # Adding pledged_quantity again would double-count pledged units.
+            total_qty = float(r.get("quantity", 0) or 0) + float(r.get("t1_quantity", 0) or 0)
 
             if total_qty <= 0:
                 continue

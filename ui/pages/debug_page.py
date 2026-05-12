@@ -61,6 +61,10 @@ def render(account_svc, portfolio_svc, aggregation_svc, md_svc, settings):
     with st.expander("2. Raw Zerodha API (kite.holdings / kite.positions / kite.margins)", expanded=True):
         _render_raw_api(account_svc, selected, refresh_raw)
 
+    # ── MF Holdings trace ─────────────────────────────────────────────
+    with st.expander("2b. MF Holdings — raw payload + P&L arithmetic trace", expanded=True):
+        _render_mf_trace(account_svc, portfolio_svc, selected, refresh_raw)
+
     # ── Layer 2: Adapter output (Holding objects) ─────────────────────
     with st.expander("3. Adapter output — Holding objects after normalisation", expanded=True):
         _render_adapter_holdings(account_svc, selected, refresh_raw)
@@ -83,6 +87,158 @@ def render(account_svc, portfolio_svc, aggregation_svc, md_svc, settings):
 
 
 # ── Section renderers ─────────────────────────────────────────────────
+
+def _render_mf_trace(account_svc, portfolio_svc, account_id: str, force: bool):
+    """
+    Show exact kite.mf_holdings() payload fields and arithmetic trace so we can
+    verify quantity semantics (is 'quantity' total or free-only?) and confirm
+    there is no double-counting in the final P&L subtotals.
+    """
+    import pandas as pd
+
+    kite_sessions = account_svc.get_kite_sessions()
+    kite = kite_sessions.get(account_id)
+    if kite is None:
+        adapter = account_svc.get_adapter(account_id)
+        if adapter and hasattr(adapter, "_sessions"):
+            kite = adapter._sessions.get(account_id)
+
+    # ── Raw mf_holdings() payload ─────────────────────────────────────
+    st.markdown("**Raw `kite.mf_holdings()` payload** (all fields, exact API values)")
+    if kite is None:
+        st.warning("No live KiteConnect session — cannot call mf_holdings().")
+    else:
+        try:
+            import time as _time
+            t0 = _time.monotonic()
+            raw_mf = kite.mf_holdings()
+            elapsed = (_time.monotonic() - t0) * 1000
+            st.caption(f"kite.mf_holdings() returned {len(raw_mf)} rows in {elapsed:.0f} ms")
+
+            if raw_mf:
+                # Show every field of every row
+                mf_rows = []
+                for r in raw_mf:
+                    mf_rows.append({k: v for k, v in r.items()})
+                df_raw = pd.DataFrame(mf_rows)
+                st.dataframe(df_raw, use_container_width=True, hide_index=True)
+
+                # ── Arithmetic trace: what do these numbers mean? ──────
+                st.markdown("**Arithmetic trace per MF holding**")
+                trace_rows = []
+                for r in raw_mf:
+                    qty       = float(r.get("quantity", 0) or 0)
+                    pledged   = float(r.get("pledged_quantity", 0) or 0)
+                    t1        = float(r.get("t1_quantity", 0) or 0)
+                    avg       = float(r.get("average_price", 0) or 0)
+                    nav       = float(r.get("last_price", 0) or 0)
+                    api_pnl   = float(r.get("pnl", 0) or 0)
+
+                    # Hypothesis A: quantity = total (pledged included)
+                    total_a   = qty + t1
+                    pnl_a     = round(total_a * (nav - avg), 2)
+
+                    # Hypothesis B: quantity = free only, pledged is additive
+                    total_b   = qty + pledged + t1
+                    pnl_b     = round(total_b * (nav - avg), 2)
+
+                    trace_rows.append({
+                        "fund":           r.get("tradingsymbol", r.get("fund", "?")),
+                        "qty(API)":       qty,
+                        "pledged(API)":   pledged,
+                        "t1(API)":        t1,
+                        "avg_price":      avg,
+                        "last_price(NAV)":nav,
+                        "api_pnl":        api_pnl,
+                        "HypA qty+t1":    total_a,
+                        "HypA pnl":       pnl_a,
+                        "HypB qty+plg+t1":total_b,
+                        "HypB pnl":       pnl_b,
+                        "matches_api_pnl":"A" if abs(pnl_a - api_pnl) < 1 else ("B" if abs(pnl_b - api_pnl) < 1 else "neither"),
+                    })
+                df_trace = pd.DataFrame(trace_rows)
+
+                def _cp(v):
+                    if isinstance(v, float): return "color:#3fb950" if v >= 0 else "color:#f85149"
+                    return ""
+
+                st.dataframe(
+                    df_trace.style.map(_cp, subset=["api_pnl","HypA pnl","HypB pnl"])
+                    .format({"qty(API)": "{:.4f}", "pledged(API)": "{:.4f}",
+                             "avg_price": "{:.4f}", "last_price(NAV)": "{:.4f}",
+                             "api_pnl": "{:+,.2f}", "HypA pnl": "{:+,.2f}", "HypB pnl": "{:+,.2f}",
+                             "HypA qty+t1": "{:.4f}", "HypB qty+plg+t1": "{:.4f}"}),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    "HypA: quantity = TOTAL units (pledged included) → use qty+t1 only. "
+                    "HypB: quantity = free-only → use qty+pledged+t1. "
+                    "'matches_api_pnl' shows which hypothesis matches the API's own pnl field."
+                )
+            else:
+                st.info("mf_holdings() returned empty — no MF holdings for this account.")
+
+        except Exception as exc:
+            st.error(f"mf_holdings() failed: {exc}")
+
+    # ── P&L subtotal breakdown (from portfolio_service cache) ─────────
+    st.markdown("---")
+    st.markdown("**Portfolio P&L arithmetic trace** (equity subtotal · MF subtotal · combined)")
+    try:
+        holdings = portfolio_svc.get_holdings(account_id)
+        eq_h  = [h for h in holdings if h.instrument_type != "MF"]
+        mf_h  = [h for h in holdings if h.instrument_type == "MF"]
+
+        eq_inv  = sum(h.invested_value for h in eq_h)
+        eq_cur  = sum(h.current_value  for h in eq_h)
+        eq_pnl  = sum(h.pnl            for h in eq_h)
+
+        mf_inv  = sum(h.invested_value for h in mf_h)
+        mf_cur  = sum(h.current_value  for h in mf_h)
+        mf_pnl  = sum(h.pnl            for h in mf_h)
+
+        tot_inv = eq_inv + mf_inv
+        tot_cur = eq_cur + mf_cur
+        tot_pnl = eq_pnl + mf_pnl
+
+        rows = [
+            {"Category": "Equity holdings",   "Count": len(eq_h),  "Invested": eq_inv,  "Current": eq_cur,  "PnL": eq_pnl},
+            {"Category": "MF holdings",        "Count": len(mf_h),  "Invested": mf_inv,  "Current": mf_cur,  "PnL": mf_pnl},
+            {"Category": "COMBINED",           "Count": len(holdings), "Invested": tot_inv, "Current": tot_cur, "PnL": tot_pnl},
+        ]
+        df_sub = pd.DataFrame(rows)
+
+        def _cp2(v):
+            if isinstance(v, float): return "color:#3fb950" if v >= 0 else "color:#f85149"
+            return ""
+
+        st.dataframe(
+            df_sub.style.map(_cp2, subset=["PnL"])
+            .format({"Invested": "{:,.0f}", "Current": "{:,.0f}", "PnL": "{:+,.0f}"}),
+            use_container_width=True, hide_index=True,
+        )
+
+        # Per-MF detail
+        if mf_h:
+            st.markdown("**Per-MF holding detail**")
+            mf_detail = []
+            for h in mf_h:
+                mf_detail.append({
+                    "symbol":    h.symbol,
+                    "qty":       h.quantity,
+                    "avg_price": h.avg_price,
+                    "nav(ltp)":  h.ltp,
+                    "invested":  h.invested_value,
+                    "current":   h.current_value,
+                    "pnl":       h.pnl,
+                    "formula":   f"{h.quantity:.4f} × ({h.ltp:.4f} − {h.avg_price:.4f}) = {h.pnl:+,.2f}",
+                })
+            df_mf = pd.DataFrame(mf_detail)
+            st.dataframe(df_mf, use_container_width=True, hide_index=True)
+
+    except Exception as exc:
+        st.error(f"P&L subtotal trace failed: {exc}")
+
 
 def _render_service_identity(account_svc, portfolio_svc, aggregation_svc):
     import pandas as pd
