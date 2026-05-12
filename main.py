@@ -131,12 +131,12 @@ def main():
         net_worth = 0.0
         day_pnl   = 0.0
 
-    render_header(settings.app_mode, net_worth, day_pnl)
+    render_header(settings.app_mode)
 
     # ── Page routing ──────────────────────────────────────────────────
     if view == "terminal":
         from ui.pages.combined_dashboard import render
-        render(aggregation_svc, md_svc)
+        render(aggregation_svc, md_svc, portfolio_svc)
 
     elif view == "account":
         from ui.pages.account_dashboard import render

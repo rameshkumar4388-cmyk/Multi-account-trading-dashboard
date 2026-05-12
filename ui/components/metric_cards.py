@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ui.theme import format_inr, format_pct
+from ui.theme import format_inr_plain as format_inr, format_pct
 
 
 def _metric(label: str, value: float, delta: float = None, prefix: str = "₹", is_pct: bool = False):

@@ -58,7 +58,8 @@ class AccountSummary:
     used_margin: float = 0.0           # Margin currently blocked
     total_collateral: float = 0.0      # Collateral from pledged holdings
     # Day metrics
-    day_pnl: float = 0.0
+    day_pnl: float = 0.0               # holdings day change + positions day m2m
+    holdings_day_pnl: float = 0.0      # holdings-only day movement (for spec metric 2)
     day_pnl_pct: float = 0.0
     # Totals
     net_worth: float = 0.0             # Holdings value + cash (collateral not double-counted)

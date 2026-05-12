@@ -1,305 +1,353 @@
 """
-Trading Terminal homepage.
+Trading Terminal — homepage.
 
-Layout priority (top to bottom):
-  1. Live combined MTM banner
-  2. Account-wise P&L cards
-  3. Underlying price monitor
-  4. Open positions table (core component)
-  5. Margin / Exposure / Instrument breakdown
+Layout (top → bottom):
+  1. NIFTY 50 + BANKNIFTY large index cards  (full width, 2 columns)
+  2. Combined summary bar                    (5 semantic metrics)
+  3. Account-wise cards                      (vertical stack per account)
+  4. Active underlyings per account          (chips/tags with LTP)
+  5. Open positions table                    (terminal-grade)
 """
 from __future__ import annotations
 
-import textwrap
+from collections import defaultdict
+from typing import List, Optional
 
 import streamlit as st
 
 from services.aggregation_service import AggregationService
 from ui.components.account_pnl_cards import render_account_pnl_cards
-from ui.components.price_monitor import render_price_monitor
-from ui.theme import format_inr, format_pct
+from ui.theme import C, format_inr, format_pct, signed_color
 
 
-# ── HTML fragment helpers ─────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────
 
-def _pnl_html(label: str, value: float, sub: str = "") -> str:
-    color = "#3fb950" if value >= 0 else "#f85149"
-    sign = "+" if value >= 0 else ""
-    sub_part = f"<div style='font-size:0.68rem;color:#8b949e;margin-top:1px;'>{sub}</div>" if sub else ""
+def _pnl_cell(label: str, value: float, sub: str = "") -> str:
+    color = signed_color(value)
+    sign  = "+" if value > 0 else ""
+    sub_h = (
+        f"<div style='font-size:0.62rem;color:{C['text_3']};margin-top:2px;'>{sub}</div>"
+        if sub else ""
+    )
     return (
-        f"<div style='flex:1;text-align:center;padding:0 8px;'>"
-        f"<div style='font-size:0.65rem;color:#6e7681;text-transform:uppercase;"
-        f"letter-spacing:0.07em;margin-bottom:4px;'>{label}</div>"
-        f"<div style='font-size:1.55rem;font-weight:700;color:{color};line-height:1.1;'>"
-        f"{sign}{format_inr(value)}</div>{sub_part}</div>"
+        f"<div style='flex:1;text-align:center;padding:0 10px;'>"
+        f"<div style='font-size:0.58rem;color:{C['text_3']};text-transform:uppercase;"
+        f"letter-spacing:0.09em;font-weight:600;margin-bottom:5px;'>{label}</div>"
+        f"<div style='font-size:1.35rem;font-weight:700;color:{color};"
+        f"font-family:\"JetBrains Mono\",monospace;line-height:1.1;'>"
+        f"{sign}{format_inr(value)}</div>{sub_h}</div>"
     )
 
 
-def _stat_html(label: str, value: str, color: str = "#e6edf3") -> str:
+def _stat_cell(label: str, value: str, color: str = None) -> str:
+    color = color or C["text_2"]
     return (
-        f"<div style='flex:1;text-align:center;padding:0 8px;'>"
-        f"<div style='font-size:0.65rem;color:#6e7681;text-transform:uppercase;"
-        f"letter-spacing:0.07em;margin-bottom:4px;'>{label}</div>"
-        f"<div style='font-size:1.55rem;font-weight:700;color:{color};line-height:1.1;'>"
-        f"{value}</div></div>"
+        f"<div style='flex:1;text-align:center;padding:0 10px;'>"
+        f"<div style='font-size:0.58rem;color:{C['text_3']};text-transform:uppercase;"
+        f"letter-spacing:0.09em;font-weight:600;margin-bottom:5px;'>{label}</div>"
+        f"<div style='font-size:1.35rem;font-weight:700;color:{color};"
+        f"font-family:\"JetBrains Mono\",monospace;line-height:1.1;'>{value}</div></div>"
     )
 
 
-def _sep() -> str:
-    return "<div style='width:1px;background:#30363d;margin:4px 0;'></div>"
+def _vdiv() -> str:
+    return f"<div style='width:1px;background:{C['border']};margin:6px 0;flex-shrink:0;'></div>"
 
 
-# ── main render ───────────────────────────────────────────────────────
+# ── index cards ───────────────────────────────────────────────────────
 
-def render(aggregation: AggregationService, md_service=None):
-    metrics = aggregation.get_combined_metrics()
-    summaries = aggregation.get_all_summaries()
-    positions = aggregation.get_combined_positions()
-    exposure = aggregation.get_exposure_breakdown()
-    account_data = aggregation.get_account_breakdown()
+def _render_index_cards(md_service):
+    """Large NIFTY 50 and BANKNIFTY cards with live LTP."""
+    indices = [("NIFTY", "NSE:NIFTY 50"), ("BANKNIFTY", "NSE:NIFTY BANK")]
+    cols = st.columns(2, gap="medium")
 
-    # ── 1. LIVE MTM BANNER ────────────────────────────────────────────
-    total_pnl     = metrics.get("total_pnl", 0)
-    day_pnl       = metrics.get("day_pnl", 0)
-    pos_pnl       = metrics.get("positions_pnl", 0)
-    hold_pnl      = metrics.get("holdings_pnl", 0)
-    net_worth     = metrics.get("net_worth", 0)
-    net_available = metrics.get("net_available", metrics.get("available_cash", 0))
-    cash          = metrics.get("available_cash", 0)
-    margin        = metrics.get("used_margin", 0)
-    collateral    = metrics.get("total_collateral", 0)
-    hold_pct      = metrics.get("holdings_pnl_pct", 0)
+    for col, (label, _) in zip(cols, indices):
+        # Try both key variants the quote feed may use
+        ltp = md_service.get_ltp(label) or 0.0
+        chg = md_service.get_change(label) or 0.0
+        pct = md_service.get_change_pct(label) or 0.0
 
-    banner_color = "#3fb950" if total_pnl >= 0 else "#f85149"
+        color   = C["positive"] if chg >= 0 else C["negative"]
+        arrow   = "&#9650;" if chg >= 0 else "&#9660;"
+        sign    = "+" if chg >= 0 else ""
+        glow    = "rgba(16,185,129,0.08)" if chg >= 0 else "rgba(239,68,68,0.08)"
+        border  = C["positive"] if chg >= 0 else C["negative"]
+
+        html = (
+            f"<div style='background:{C['card']};border:1px solid {C['border']};"
+            f"border-top:2px solid {border};border-radius:10px;padding:18px 22px;"
+            f"background-image:radial-gradient(ellipse at top,{glow} 0%,transparent 70%);"
+            f"box-shadow:0 4px 32px rgba(0,0,0,0.5);'>"
+            f"<div style='font-size:0.68rem;color:{C['text_3']};text-transform:uppercase;"
+            f"letter-spacing:0.1em;font-weight:700;margin-bottom:6px;'>{label}</div>"
+            f"<div style='font-size:2.2rem;font-weight:700;color:{C['text_1']};"
+            f"font-family:\"JetBrains Mono\",monospace;line-height:1;letter-spacing:-0.02em;'>"
+            f"{'--' if ltp == 0 else f'{ltp:,.2f}'}</div>"
+            f"<div style='font-size:0.88rem;color:{color};font-weight:600;margin-top:6px;"
+            f"font-family:\"JetBrains Mono\",monospace;'>"
+            f"{arrow} {sign}{chg:,.2f} ({sign}{pct:.2f}%)</div>"
+            f"</div>"
+        )
+        with col:
+            st.markdown(html, unsafe_allow_html=True)
+
+
+# ── combined summary bar ──────────────────────────────────────────────
+
+def _render_summary_bar(metrics: dict):
+    """
+    5-metric horizontal bar per spec:
+      MTM Positions P&L | Day P&L (holdings) | Holdings P&L | Net Worth | Cash Available
+    """
+    pos_pnl      = metrics.get("positions_pnl", 0)
+    holdings_day = metrics.get("holdings_day_pnl", 0)  # holdings-only day movement
+    hold_pnl     = metrics.get("holdings_pnl", 0)
+    hold_pct     = metrics.get("holdings_pnl_pct", 0)
+    # Net worth per spec = holdings_value + cash + positions_pnl
+    net_worth    = metrics.get("net_worth", 0) + pos_pnl
+    cash_avail   = metrics.get("net_available", 0)     # cash + collateral
+
+    top_border_color = signed_color(pos_pnl + hold_pnl)
 
     inner = (
-        _pnl_html("Total MTM P&L", total_pnl) + _sep() +
-        _pnl_html("Day P&L", day_pnl) + _sep() +
-        _pnl_html("Positions P&L", pos_pnl) + _sep() +
-        _pnl_html("Holdings P&L", hold_pnl, format_pct(hold_pct)) + _sep() +
-        _stat_html("Net Worth", format_inr(net_worth), "#58a6ff") + _sep() +
-        _stat_html("Available", format_inr(net_available), "#c9d1d9") + _sep() +
-        _stat_html("Margin Used", format_inr(margin), "#f0883e")
+        _pnl_cell("MTM Positions P&L", pos_pnl) + _vdiv() +
+        _pnl_cell("Day P&L", holdings_day) + _vdiv() +
+        _pnl_cell("Holdings P&L", hold_pnl, format_pct(hold_pct)) + _vdiv() +
+        _stat_cell("Net Worth", format_inr(net_worth), "#a78bfa") + _vdiv() +
+        _stat_cell("Cash Available", format_inr(cash_avail), C["text_2"])
     )
-    banner = (
-        f"<div style='background:#161b22;border-top:3px solid {banner_color};"
-        f"border-radius:0 0 10px 10px;padding:16px 20px;margin-bottom:16px;'>"
-        f"<div style='display:flex;align-items:center;gap:0;'>{inner}</div></div>"
+
+    st.markdown(
+        f"<div style='background:{C['card']};border:1px solid {C['border']};"
+        f"border-top:2px solid {top_border_color};"
+        f"border-radius:10px;padding:14px 20px;margin-bottom:18px;"
+        f"box-shadow:0 2px 20px rgba(0,0,0,0.4);'>"
+        f"<div style='display:flex;align-items:stretch;gap:0;'>{inner}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
     )
-    st.markdown(banner, unsafe_allow_html=True)
-
-    # ── 2. ACCOUNT P&L CARDS ─────────────────────────────────────────
-    render_account_pnl_cards(summaries, aggregation._accounts._account_configs)
-    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
-
-    # ── 3. UNDERLYING PRICE MONITOR ───────────────────────────────────
-    if md_service and positions:
-        seen: list = []
-        for p in positions:
-            sym = p.underlying or p.symbol
-            if sym and sym not in seen:
-                seen.append(sym)
-        for idx in ("NIFTY", "BANKNIFTY"):
-            if idx not in seen:
-                seen.insert(0, idx)
-        render_price_monitor(seen[:12], md_service)
-        st.markdown("<div style='margin-top:4px;'></div>", unsafe_allow_html=True)
-
-    st.divider()
-
-    # ── 4. OPEN POSITIONS TABLE ───────────────────────────────────────
-    _render_positions_terminal(positions, aggregation)
-
-    st.divider()
-
-    # ── 5. MARGIN / EXPOSURE / INSTRUMENT BREAKDOWN ───────────────────
-    col_margin, col_exp, col_inst = st.columns(3, gap="medium")
-    with col_margin:
-        _render_margin_bars(account_data)
-    with col_exp:
-        _render_exposure_donut(exposure)
-    with col_inst:
-        _render_instrument_mix(positions)
 
 
-# ── sub-sections ──────────────────────────────────────────────────────
+# ── underlying chips ──────────────────────────────────────────────────
 
-def _render_positions_terminal(positions, aggregation):
+def _render_underlying_section(positions, account_configs: dict, md_service):
+    """Per-account chips showing active underlyings with live LTP."""
+    # Group positions by account_id
+    by_account: dict = defaultdict(list)
+    for p in positions:
+        if p.quantity != 0:
+            by_account[p.account_id].append(p)
+
+    all_account_ids = list(account_configs.keys())
+    if not all_account_ids:
+        return
+
+    st.markdown(
+        f"<div style='font-size:0.62rem;color:{C['text_3']};font-weight:700;"
+        f"text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px;'>"
+        f"Active Underlyings by Account</div>",
+        unsafe_allow_html=True,
+    )
+
+    cols = st.columns(len(all_account_ids), gap="small")
+
+    for col, account_id in zip(cols, all_account_ids):
+        cfg  = account_configs.get(account_id)
+        name = cfg.display_name if cfg else account_id
+        client_id = (
+            (cfg.credentials.get("user_id", "") if cfg else "") or account_id
+        ).upper().replace("_", " ")
+
+        account_positions = by_account.get(account_id, [])
+        underlyings = list(dict.fromkeys(
+            p.underlying or p.symbol
+            for p in account_positions
+            if p.underlying or p.symbol
+        ))
+
+        if underlyings:
+            chips_html = ""
+            for sym in underlyings:
+                ltp    = md_service.get_ltp(sym) or 0.0
+                chg    = md_service.get_change(sym) or 0.0
+                color  = C["positive"] if chg >= 0 else C["negative"]
+                ltp_s  = f"{ltp:,.0f}" if ltp > 0 else "--"
+                chips_html += (
+                    f"<div style='display:inline-flex;flex-direction:column;"
+                    f"background:rgba(45,49,112,0.2);border:1px solid {C['border_glow']};"
+                    f"border-radius:6px;padding:5px 10px;margin:3px 3px 3px 0;"
+                    f"min-width:64px;'>"
+                    f"<span style='font-size:0.65rem;font-weight:700;color:#a78bfa;"
+                    f"letter-spacing:0.04em;'>{sym}</span>"
+                    f"<span style='font-size:0.68rem;font-weight:600;color:{color};"
+                    f"font-family:\"JetBrains Mono\",monospace;'>{ltp_s}</span>"
+                    f"</div>"
+                )
+        else:
+            chips_html = (
+                f"<span style='font-size:0.72rem;color:{C['text_3']};font-style:italic;'>NIL</span>"
+            )
+
+        card = (
+            f"<div style='background:{C['card']};border:1px solid {C['border']};"
+            f"border-radius:8px;padding:12px 14px;min-height:80px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;"
+            f"margin-bottom:8px;'>"
+            f"<span style='font-size:0.7rem;font-weight:600;color:{C['text_2']};'>{name}</span>"
+            f"<span style='font-size:0.58rem;color:#454a6e;background:#0d0e1a;"
+            f"padding:1px 6px;border-radius:6px;font-weight:600;'>{client_id}</span>"
+            f"</div>"
+            f"<div style='display:flex;flex-wrap:wrap;'>{chips_html}</div>"
+            f"</div>"
+        )
+        with col:
+            st.markdown(card, unsafe_allow_html=True)
+
+
+# ── positions table ───────────────────────────────────────────────────
+
+def _render_positions_table(positions, aggregation: AggregationService):
     import pandas as pd
 
     open_pos = [p for p in positions if p.quantity != 0]
+
     if not open_pos:
         st.markdown(
-            "<div style='background:#161b22;border:1px solid #30363d;border-radius:8px;"
-            "padding:24px;text-align:center;color:#6e7681;'>No open positions</div>",
+            f"<div style='background:{C['card']};border:1px solid {C['border']};"
+            f"border-radius:8px;padding:32px;text-align:center;color:{C['text_3']};'>"
+            f"No open positions</div>",
             unsafe_allow_html=True,
         )
         return
 
-    total_mtm = sum(p.pnl for p in open_pos)
-    day_total = sum(p.day_pnl for p in open_pos)
-    long_c  = sum(1 for p in open_pos if p.quantity > 0)
-    short_c = sum(1 for p in open_pos if p.quantity < 0)
-    mtm_color = "#3fb950" if total_mtm >= 0 else "#f85149"
-    day_color = "#3fb950" if day_total >= 0 else "#f85149"
-    mtm_sign  = "+" if total_mtm >= 0 else ""
-    day_sign  = "+" if day_total >= 0 else ""
+    mtm   = sum(p.pnl for p in open_pos)
+    day   = sum(p.day_pnl for p in open_pos)
+    long_ = sum(1 for p in open_pos if p.quantity > 0)
+    short_= sum(1 for p in open_pos if p.quantity < 0)
 
-    header = (
-        f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;'>"
-        f"<div style='font-size:0.95rem;font-weight:700;color:#c9d1d9;'>Open Positions"
-        f"<span style='font-size:0.72rem;background:#21262d;color:#8b949e;"
-        f"padding:2px 8px;border-radius:10px;margin-left:8px;font-weight:500;'>"
-        f"{len(open_pos)} positions</span></div>"
-        f"<div style='font-size:0.82rem;display:flex;gap:16px;'>"
-        f"<span style='color:{mtm_color};font-weight:600;'>MTM {mtm_sign}{format_inr(total_mtm)}</span>"
-        f"<span style='color:{day_color};font-weight:600;'>Day {day_sign}{format_inr(day_total)}</span>"
-        f"<span style='color:#8b949e;'>L: <strong style='color:#3fb950;'>{long_c}</strong>"
-        f"&nbsp;S: <strong style='color:#f85149;'>{short_c}</strong></span>"
-        f"</div></div>"
+    mc = signed_color(mtm)
+    dc = signed_color(day)
+    ms = "+" if mtm > 0 else ""
+    ds = "+" if day > 0 else ""
+
+    ct2  = C["text_2"]
+    ct3  = C["text_3"]
+    cpos = C["positive"]
+    cneg = C["negative"]
+    ccard= C["card"]
+    cbdr = C["border"]
+    st.markdown(
+        f"<div style='display:flex;justify-content:space-between;align-items:center;"
+        f"margin-bottom:10px;'>"
+        f"<div style='font-size:0.82rem;font-weight:700;color:{ct2};'>Open Positions"
+        f"<span style='font-size:0.65rem;background:{ccard};color:{ct3};"
+        f"padding:2px 8px;border-radius:8px;margin-left:8px;border:1px solid {cbdr};'>"
+        f"{len(open_pos)}</span></div>"
+        f"<div style='font-size:0.78rem;display:flex;gap:18px;'>"
+        f"<span style='color:{mc};font-weight:600;'>MTM {ms}{format_inr(mtm)}</span>"
+        f"<span style='color:{dc};font-weight:600;'>Day {ds}{format_inr(day)}</span>"
+        f"<span style='color:{ct3};'>L:<strong style='color:{cpos};'>{long_}</strong>"
+        f" S:<strong style='color:{cneg};'>{short_}</strong></span>"
+        f"</div></div>",
+        unsafe_allow_html=True,
     )
-    st.markdown(header, unsafe_allow_html=True)
 
     rows = []
     for p in sorted(open_pos, key=lambda x: abs(x.pnl), reverse=True):
         cfg = aggregation._accounts._account_configs.get(p.account_id)
+        client = (cfg.credentials.get("user_id", "") if cfg else "") or p.account_id
         rows.append({
-            "Symbol": p.tradingsymbol or p.symbol,
+            "Symbol":     p.tradingsymbol or p.symbol,
             "Underlying": p.underlying or p.symbol,
-            "Type": p.instrument_type,
-            "Product": p.product,
-            "Dir": "L" if p.quantity > 0 else "S",
-            "Qty": p.quantity,
-            "Avg": p.avg_price,
-            "LTP": p.ltp,
-            "MTM PnL": p.pnl,
-            "Day PnL": p.day_pnl,
-            "Expiry": p.expiry or "-",
-            "Strike": f"{p.strike:,.0f}" if p.strike else "-",
-            "Account": cfg.display_name if cfg else p.account_id,
+            "Type":       p.instrument_type,
+            "Dir":        "L" if p.quantity > 0 else "S",
+            "Qty":        p.quantity,
+            "Avg":        p.avg_price,
+            "LTP":        p.ltp,
+            "MTM PnL":    p.pnl,
+            "Day PnL":    p.day_pnl,
+            "Expiry":     p.expiry or "—",
+            "Strike":     f"{p.strike:,.0f}" if p.strike else "—",
+            "Account":    client.upper().replace("_", " "),
         })
 
     df = pd.DataFrame(rows)
 
-    def color_pnl(val):
-        if isinstance(val, (int, float)):
-            return "color: #3fb950" if val >= 0 else "color: #f85149"
+    def _cpnl(v):
+        if isinstance(v, (int, float)):
+            return f"color: {C['positive']}" if v >= 0 else f"color: {C['negative']}"
         return ""
 
-    def color_dir(val):
-        return ("color: #3fb950; font-weight:700" if val == "L"
-                else "color: #f85149; font-weight:700" if val == "S" else "")
+    def _cdir(v):
+        if v == "L": return f"color: {C['positive']}; font-weight:700"
+        if v == "S": return f"color: {C['negative']}; font-weight:700"
+        return ""
 
-    def color_type(val):
-        c = {"FUT": "#58a6ff", "CE": "#3fb950", "PE": "#f85149", "EQ": "#c9d1d9"}.get(str(val), "#8b949e")
-        return f"color: {c}; font-weight:600"
+    def _ctype(v):
+        pal = {"FUT": "#60a5fa", "CE": "#34d399", "PE": "#f87171", "EQ": C["text_2"]}
+        return f"color: {pal.get(str(v), C['text_3'])}; font-weight:600"
 
     styled = (
         df.style
-        .map(color_pnl, subset=["MTM PnL", "Day PnL"])
-        .map(color_dir, subset=["Dir"])
-        .map(color_type, subset=["Type"])
-        .format({"Avg": "{:,.2f}", "LTP": "{:,.2f}", "MTM PnL": "{:+,.0f}", "Day PnL": "{:+,.0f}"})
-        .set_properties(**{"background-color": "#161b22", "color": "#e6edf3", "font-size": "12.5px"})
+        .map(_cpnl, subset=["MTM PnL", "Day PnL"])
+        .map(_cdir,  subset=["Dir"])
+        .map(_ctype, subset=["Type"])
+        .format({
+            "Avg":     "{:,.2f}",
+            "LTP":     "{:,.2f}",
+            "MTM PnL": "{:+,.0f}",
+            "Day PnL": "{:+,.0f}",
+        })
+        .set_properties(**{
+            "background-color": C["card"],
+            "color":            C["text_1"],
+            "font-size":        "12px",
+            "font-family":      "\"JetBrains Mono\", monospace",
+        })
         .set_table_styles([{"selector": "th", "props": [
-            ("background-color", "#21262d"), ("color", "#8b949e"),
-            ("font-size", "10.5px"), ("text-transform", "uppercase"),
-            ("letter-spacing", "0.05em"), ("padding", "6px 8px"),
+            ("background-color", "#0a0b18"),
+            ("color",            C["text_3"]),
+            ("font-size",        "10px"),
+            ("text-transform",   "uppercase"),
+            ("letter-spacing",   "0.07em"),
+            ("padding",          "7px 10px"),
+            ("font-weight",      "700"),
         ]}])
     )
-    st.dataframe(styled, use_container_width=True, height=min(80 + len(rows) * 36, 420), hide_index=True)
+    height = min(56 + len(rows) * 36, 440)
+    st.dataframe(styled, use_container_width=True, height=height, hide_index=True)
 
 
-def _render_margin_bars(account_data: list):
-    st.markdown(
-        "<div style='font-size:0.72rem;color:#6e7681;font-weight:600;text-transform:uppercase;"
-        "letter-spacing:0.08em;margin-bottom:10px;'>Margin Usage</div>",
-        unsafe_allow_html=True,
-    )
-    for d in account_data:
-        used          = d.get("used_margin", 0)
-        net_available = d.get("net_available", d.get("available_cash", 0))
-        total         = used + net_available
-        pct           = (used / total * 100) if total > 0 else 0.0
-        bar_c         = "#f85149" if pct > 75 else ("#f0883e" if pct > 50 else "#3fb950")
-        name          = d.get("display_name", d.get("account_id", ""))
-        html = (
-            f"<div style='margin-bottom:10px;'>"
-            f"<div style='display:flex;justify-content:space-between;font-size:0.72rem;"
-            f"color:#8b949e;margin-bottom:3px;'>"
-            f"<span style='color:#c9d1d9;font-weight:600;'>{name}</span>"
-            f"<span>{pct:.0f}% used</span></div>"
-            f"<div style='background:#21262d;border-radius:3px;height:6px;'>"
-            f"<div style='background:{bar_c};width:{min(pct,100):.0f}%;height:100%;border-radius:3px;'></div></div>"
-            f"<div style='display:flex;justify-content:space-between;font-size:0.68rem;"
-            f"color:#6e7681;margin-top:2px;'>"
-            f"<span>Used: {format_inr(used)}</span><span>Avail: {format_inr(net_available)}</span></div></div>"
-        )
-        st.markdown(html, unsafe_allow_html=True)
+# ── main render ───────────────────────────────────────────────────────
 
+def render(
+    aggregation: AggregationService,
+    md_service=None,
+    portfolio_svc=None,
+):
+    metrics      = aggregation.get_combined_metrics()
+    summaries    = aggregation.get_all_summaries()
+    positions    = aggregation.get_combined_positions()
+    account_cfgs  = aggregation._accounts._account_configs
+    active_ids    = aggregation._accounts.list_account_ids()
+    active_cfgs   = {aid: account_cfgs[aid] for aid in active_ids if aid in account_cfgs}
 
-def _render_exposure_donut(exposure: dict):
-    import plotly.graph_objects as go
+    # ── 1. Index cards ────────────────────────────────────────────────
+    if md_service:
+        _render_index_cards(md_service)
+        st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
 
-    items = [(k, v) for k, v in exposure.items() if v > 0]
-    if not items:
-        return
-    labels, values = zip(*items)
-    palette = ["#58a6ff", "#3fb950", "#f0883e", "#f85149", "#d2a8ff"]
+    # ── 2. Combined summary bar ───────────────────────────────────────
+    _render_summary_bar(metrics)
 
-    fig = go.Figure(go.Pie(
-        labels=list(labels), values=list(values), hole=0.55,
-        marker=dict(colors=palette[:len(labels)], line=dict(color="#0d1117", width=2)),
-        textinfo="label+percent",
-        textfont=dict(size=10, color="#c9d1d9"),
-        hovertemplate="<b>%{label}</b><br>%{value:,.0f}<br>%{percent}<extra></extra>",
-    ))
-    fig.update_layout(
-        title=dict(text="Exposure by Type", font=dict(color="#8b949e", size=11), x=0.0),
-        paper_bgcolor="#161b22", plot_bgcolor="#161b22",
-        font=dict(color="#c9d1d9"),
-        height=260, margin=dict(l=0, r=0, t=28, b=0),
-        showlegend=False,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    # ── 3. Account cards ──────────────────────────────────────────────
+    render_account_pnl_cards(summaries, account_cfgs)
+    st.markdown("<div style='margin-bottom:20px;'></div>", unsafe_allow_html=True)
 
+    # ── 4. Active underlyings ─────────────────────────────────────────
+    if md_service:
+        _render_underlying_section(positions, active_cfgs, md_service)
+        st.markdown("<div style='margin-bottom:20px;'></div>", unsafe_allow_html=True)
 
-def _render_instrument_mix(positions: list):
-    from collections import defaultdict
-
-    st.markdown(
-        "<div style='font-size:0.72rem;color:#6e7681;font-weight:600;text-transform:uppercase;"
-        "letter-spacing:0.08em;margin-bottom:8px;'>Instrument Mix</div>",
-        unsafe_allow_html=True,
-    )
-
-    buckets: dict = defaultdict(lambda: {"count": 0, "pnl": 0.0, "long": 0, "short": 0})
-    for p in positions:
-        t = p.instrument_type
-        buckets[t]["count"] += 1
-        buckets[t]["pnl"] += p.pnl
-        if p.quantity > 0:
-            buckets[t]["long"] += 1
-        else:
-            buckets[t]["short"] += 1
-
-    type_colors = {"FUT": "#58a6ff", "CE": "#3fb950", "PE": "#f85149", "EQ": "#c9d1d9"}
-
-    for itype, data in sorted(buckets.items(), key=lambda x: -abs(x[1]["pnl"])):
-        pnl    = data["pnl"]
-        pnl_c  = "#3fb950" if pnl >= 0 else "#f85149"
-        pnl_sign = "+" if pnl >= 0 else ""
-        tc     = type_colors.get(itype, "#8b949e")
-        html = (
-            f"<div style='display:flex;justify-content:space-between;align-items:center;"
-            f"background:#21262d;border-radius:6px;padding:8px 12px;margin-bottom:6px;'>"
-            f"<div style='display:flex;align-items:center;gap:8px;'>"
-            f"<span style='background:{tc}22;color:{tc};font-size:0.7rem;font-weight:700;"
-            f"padding:2px 7px;border-radius:4px;'>{itype}</span>"
-            f"<span style='color:#8b949e;font-size:0.75rem;'>{data['count']} pos"
-            f"&nbsp;<span style='color:#3fb950;'>L:{data['long']}</span>"
-            f"<span style='color:#f85149;'> S:{data['short']}</span></span></div>"
-            f"<span style='color:{pnl_c};font-size:0.78rem;font-weight:600;'>"
-            f"{pnl_sign}{format_inr(pnl)}</span></div>"
-        )
-        st.markdown(html, unsafe_allow_html=True)
+    # ── 5. Positions table ────────────────────────────────────────────
+    _render_positions_table(positions, aggregation)

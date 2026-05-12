@@ -1,79 +1,137 @@
 """
-Account-wise MTM P&L cards — the most prominent element on the trading terminal homepage.
+Account-wise P&L cards — vertical metric stack layout.
 
-Each card shows a single account's live P&L state in a compact,
-color-coded panel that is immediately readable at a glance.
+Each card shows per-account metrics in a vertical list:
+  MTM Positions P&L  ← most prominent
+  Day P&L
+  Margin Available   (= net_available: cash + collateral)
+  Used Margin        + progress bar
+  Holdings P&L
+  Net Worth          (holdings_value + cash + positions_pnl)
 """
 from __future__ import annotations
 
-import textwrap
 from typing import List
 
 import streamlit as st
 
 from schemas.account import AccountSummary
-from ui.theme import format_inr
+from ui.theme import C, format_inr, signed_color
+
+
+def _metric_row(label: str, value: float, size: str = "sm", highlight: bool = False) -> str:
+    color = signed_color(value)
+    sign  = "+" if value > 0 else ""
+    val_s = format_inr(value)
+    val_display = f"{sign}{val_s}" if value != 0 else val_s
+
+    font_size = {"lg": "1.15rem", "md": "0.95rem", "sm": "0.82rem"}.get(size, "0.82rem")
+    label_size = "0.58rem"
+    label_color = "#454a6e"
+    bg = "background:rgba(109,40,217,0.06);border-radius:6px;padding:6px 8px;" if highlight else "padding:5px 0;"
+
+    return (
+        f"<div style='{bg}margin-bottom:4px;'>"
+        f"<div style='font-size:{label_size};color:{label_color};text-transform:uppercase;"
+        f"letter-spacing:0.08em;font-weight:600;margin-bottom:2px;'>{label}</div>"
+        f"<div style='font-size:{font_size};font-weight:700;color:{color};"
+        f"font-family:\"JetBrains Mono\",monospace;line-height:1.2;'>{val_display}</div>"
+        f"</div>"
+    )
+
+
+def _neutral_row(label: str, value_html: str, size: str = "sm") -> str:
+    font_size = {"lg": "1.15rem", "md": "0.95rem", "sm": "0.82rem"}.get(size, "0.82rem")
+    return (
+        f"<div style='padding:5px 0;margin-bottom:4px;'>"
+        f"<div style='font-size:0.58rem;color:#454a6e;text-transform:uppercase;"
+        f"letter-spacing:0.08em;font-weight:600;margin-bottom:2px;'>{label}</div>"
+        f"<div style='font-size:{font_size};font-weight:700;color:#8892b0;"
+        f"font-family:\"JetBrains Mono\",monospace;line-height:1.2;'>{value_html}</div>"
+        f"</div>"
+    )
 
 
 def render_account_pnl_cards(summaries: List[AccountSummary], account_configs: dict):
     if not summaries:
-        st.info("No account data available.")
+        st.info("No account data.")
         return
 
     cols = st.columns(len(summaries), gap="small")
 
     for col, s in zip(cols, summaries):
         cfg = account_configs.get(s.account_id)
-        broker = cfg.metadata.get("original_broker", s.broker).capitalize() if cfg else s.broker.capitalize()
+        # Show Zerodha client ID if configured, else internal account id
+        client_id = ""
+        if cfg:
+            client_id = (cfg.credentials.get("user_id", "")
+                         or cfg.owner or s.account_id.upper())
+        client_id = client_id.upper().replace("_", " ") if client_id else s.account_id.upper()
 
-        day_color = "#3fb950" if s.day_pnl >= 0 else "#f85149"
-        mtm_color = "#3fb950" if s.total_pnl >= 0 else "#f85149"
-        day_sign = "+" if s.day_pnl >= 0 else ""
-        mtm_sign = "+" if s.total_pnl >= 0 else ""
+        # Net worth per spec = holdings_value + cash + positions_pnl
+        card_net_worth = (
+            s.total_holdings_value + s.available_cash + s.positions_pnl
+        )
 
-        # Total margin capacity = already used + still available for trading
-        # net_available already accounts for collateral; use it, not raw cash
+        # Margin bar
         total_capacity = s.used_margin + s.net_available
-        margin_pct = (s.used_margin / total_capacity * 100) if total_capacity > 0 else 0.0
-        margin_bar_color = "#f85149" if margin_pct > 75 else ("#f0883e" if margin_pct > 50 else "#3fb950")
-        margin_bar_width = min(margin_pct, 100)
-        acct_label = s.account_id.upper().replace("_", " ")
+        margin_pct     = (s.used_margin / total_capacity * 100) if total_capacity > 0 else 0.0
+        margin_pct     = min(margin_pct, 100)
+        bar_color      = C["negative"] if margin_pct > 75 else (C["warning"] if margin_pct > 50 else C["positive"])
 
-        html = textwrap.dedent(f"""
-<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px 16px;">
-<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">
-<div>
-<div style="font-size:0.82rem;font-weight:700;color:#e6edf3;line-height:1.2;">{s.display_name}</div>
-<div style="font-size:0.68rem;color:#6e7681;margin-top:2px;">{broker}</div>
-</div>
-<div style="font-size:0.62rem;background:#21262d;color:#8b949e;padding:2px 7px;border-radius:10px;font-weight:600;">{acct_label}</div>
-</div>
-<div style="margin-bottom:8px;">
-<div style="font-size:0.62rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;">Day P&amp;L</div>
-<div style="font-size:1.3rem;font-weight:700;color:{day_color};line-height:1;">{day_sign}{format_inr(s.day_pnl)}</div>
-</div>
-<div style="display:flex;gap:12px;margin-bottom:10px;">
-<div style="flex:1;">
-<div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:1px;">MTM P&amp;L</div>
-<div style="font-size:0.85rem;font-weight:600;color:{mtm_color};">{mtm_sign}{format_inr(s.total_pnl)}</div>
-</div>
-<div style="flex:1;">
-<div style="font-size:0.6rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:1px;">Net Worth</div>
-<div style="font-size:0.85rem;font-weight:600;color:#c9d1d9;">{format_inr(s.net_worth)}</div>
-</div>
-</div>
-<div>
-<div style="display:flex;justify-content:space-between;font-size:0.62rem;color:#6e7681;margin-bottom:3px;">
-<span>Margin Used</span>
-<span>{format_inr(s.used_margin)} ({margin_pct:.0f}%)</span>
-</div>
-<div style="background:#21262d;border-radius:3px;height:4px;">
-<div style="background:{margin_bar_color};width:{margin_bar_width:.0f}%;height:100%;border-radius:3px;"></div>
-</div>
-<div style="font-size:0.62rem;color:#6e7681;margin-top:2px;">Avail: {format_inr(s.net_available)} &nbsp;·&nbsp; Cash: {format_inr(s.available_cash)}</div>
-</div>
-</div>
-        """).strip()
+        # Build inner content
+        inner = (
+            # ── Positions MTM P&L (most prominent) ──
+            _metric_row("MTM Positions P&L", s.positions_pnl, size="lg", highlight=True)
+            # ── Day P&L ──
+            + _metric_row("Day P&L (Holdings)", s.holdings_day_pnl, size="md")
+            # ── Divider ──
+            + "<div style='border-top:1px solid #1c1f3a;margin:6px 0;'></div>"
+            # ── Margin Available ──
+            + _neutral_row(
+                "Margin Available",
+                format_inr(s.net_available),
+            )
+            # ── Used Margin + bar ──
+            + f"<div style='padding:5px 0;margin-bottom:4px;'>"
+            + f"<div style='display:flex;justify-content:space-between;"
+            + f"font-size:0.58rem;color:#454a6e;text-transform:uppercase;"
+            + f"letter-spacing:0.08em;font-weight:600;margin-bottom:3px;'>"
+            + f"<span>Used Margin</span><span style='color:{bar_color}'>{margin_pct:.0f}%</span></div>"
+            + f"<div style='background:#1c1f3a;border-radius:3px;height:4px;overflow:hidden;'>"
+            + f"<div style='background:{bar_color};width:{margin_pct:.1f}%;height:100%;border-radius:3px;'></div></div>"
+            + f"<div style='font-size:0.7rem;font-weight:600;color:#8892b0;"
+            + f"font-family:\"JetBrains Mono\",monospace;margin-top:3px;'>{format_inr(s.used_margin)}</div>"
+            + "</div>"
+            # ── Divider ──
+            + "<div style='border-top:1px solid #1c1f3a;margin:6px 0;'></div>"
+            # ── Holdings P&L ──
+            + _metric_row("Holdings P&L", s.holdings_pnl, size="sm")
+            # ── Net Worth ──
+            + f"<div style='padding:5px 0;margin-top:2px;'>"
+            + f"<div style='font-size:0.58rem;color:#454a6e;text-transform:uppercase;"
+            + f"letter-spacing:0.08em;font-weight:600;margin-bottom:2px;'>Net Worth</div>"
+            + f"<div style='font-size:0.88rem;font-weight:700;color:#a78bfa;"
+            + f"font-family:\"JetBrains Mono\",monospace;'>{format_inr(card_net_worth)}</div>"
+            + "</div>"
+        )
+
+        html = (
+            f"<div style='background:{C['card']};border:1px solid {C['border']};"
+            f"border-radius:10px;padding:14px 16px;height:100%;"
+            f"box-shadow:0 4px 24px rgba(0,0,0,0.4);'>"
+            # Card header
+            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;"
+            f"margin-bottom:10px;'>"
+            f"<div style='font-size:0.8rem;font-weight:700;color:{C['text_1']};'>"
+            f"{s.display_name}</div>"
+            f"<div style='font-size:0.6rem;background:rgba(109,40,217,0.15);"
+            f"color:#a78bfa;padding:2px 7px;border-radius:8px;font-weight:600;"
+            f"letter-spacing:0.06em;'>{client_id}</div>"
+            f"</div>"
+            f"{inner}"
+            f"</div>"
+        )
 
         with col:
             st.markdown(html, unsafe_allow_html=True)

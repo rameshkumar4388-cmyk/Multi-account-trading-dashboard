@@ -128,6 +128,7 @@ class PortfolioService:
             holdings_pnl_pct=round((holdings_pnl / total_invested) * 100, 2) if total_invested else 0.0,
             positions_pnl=round(positions_pnl, 2),
             day_pnl=day_pnl,
+            holdings_day_pnl=round(holdings_day_pnl, 2),
             available_cash=available_cash,
             net_available=net_available,
             used_margin=used_margin,
