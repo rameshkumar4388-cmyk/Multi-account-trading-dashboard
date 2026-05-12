@@ -200,8 +200,15 @@ def load_settings() -> AppSettings:
     db_path = os.getenv("DB_PATH", "data/dashboard.db").strip()
 
     if mode == "live":
-        # Try tagged multi-account pattern first, then flat single-account pattern
-        accounts = _load_accounts_from_env() or _load_kite_single_account_from_env()
+        # Merge both discovery methods so ZERODHA_<TAG>_* accounts and the flat
+        # KITE_*/ZERODHA_* single-account pattern coexist without either silencing
+        # the other.  Deduplication by account_id prevents the same account
+        # appearing twice if someone defines it both ways.
+        tagged_accounts = _load_accounts_from_env()
+        flat_accounts   = _load_kite_single_account_from_env()
+        tagged_ids      = {a.account_id for a in tagged_accounts}
+        accounts        = tagged_accounts + [a for a in flat_accounts
+                                             if a.account_id not in tagged_ids]
         if not accounts:
             logger.warning(
                 "APP_MODE=live but no valid Zerodha accounts found in .env — "
