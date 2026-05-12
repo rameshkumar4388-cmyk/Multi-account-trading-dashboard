@@ -32,15 +32,29 @@ html, body, [class*="css"] {{
     -webkit-font-smoothing: antialiased;
 }}
 
+/* ── Hide Streamlit's default header bar completely ─────────────── */
+[data-testid="stHeader"],
+header[data-testid="stHeader"] {{
+    display: none !important;
+    height: 0 !important;
+}}
+/* Remove the top padding that was reserved for the header */
+.stApp > .main > .block-container,
+.block-container {{
+    padding-top: 0.6rem !important;
+    padding-bottom: 1.5rem !important;
+    max-width: 100% !important;
+}}
+/* Keep the 3-dot deploy menu accessible */
+[data-testid="stToolbar"] {{
+    top: 0.4rem !important;
+}}
+
 /* ── App shell ─────────────────────────────────────────────────── */
 .stApp {{
     background-color: {C["bg"]};
     color: {C["text_1"]};
-}}
-.block-container {{
-    padding-top: 1rem !important;
-    padding-bottom: 2rem !important;
-    max-width: 100% !important;
+    margin-top: 0 !important;
 }}
 
 /* ── Sidebar ───────────────────────────────────────────────────── */

@@ -69,6 +69,10 @@ def _get_account_service(_settings, _db):
 def _get_market_data_service(_settings, _account_svc):
     svc = MarketDataService(_settings)
     symbols = _account_svc.get_all_symbols()
+    # Always subscribe key indices so NIFTY/BANKNIFTY cards have live data
+    for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY"):
+        if idx not in symbols:
+            symbols.insert(0, idx)
     svc.initialize(symbols)
     if _settings.app_mode == "live":
         sessions = _account_svc.get_kite_sessions()

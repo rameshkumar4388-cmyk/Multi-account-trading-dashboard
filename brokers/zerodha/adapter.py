@@ -418,16 +418,24 @@ class ZerodhaAdapter(BrokerAdapter):
         exposure         = float(utilised.get("exposure", 0))
         option_premium   = float(utilised.get("option_premium", 0))
 
+        # net_available = cash + collateral − debits
+        # Prefer Zerodha's live_balance but fall back to explicit computation in case
+        # live_balance is 0 (can happen outside market hours on some accounts).
+        explicit_available = round(max(cash + collateral - debits, 0.0), 2)
+        net_available_val  = live_balance if live_balance > 0 else explicit_available
+
         logger.debug(
-            "get_margin '%s': cash=%.2f collateral=%.2f live_balance=%.2f debits=%.2f",
-            account_id, cash, collateral, live_balance, debits,
+            "get_margin '%s': cash=%.2f collateral=%.2f live_balance=%.2f "
+            "explicit=%.2f debits=%.2f → net_available=%.2f",
+            account_id, cash, collateral, live_balance,
+            explicit_available, debits, net_available_val,
         )
 
         return MarginInfo(
             account_id=account_id,
             broker="zerodha",
             available_cash=cash,
-            net_available=live_balance,
+            net_available=net_available_val,
             used_margin=debits,
             total_collateral=collateral,
             span_margin=span,

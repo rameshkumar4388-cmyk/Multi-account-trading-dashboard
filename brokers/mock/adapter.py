@@ -268,10 +268,10 @@ class MockAdapter(BrokerAdapter):
             qty = p["qty"]
             avg = p["avg"]
             lot = p.get("lot_size", 1)
-
-            cost = qty * avg * lot
-            value = qty * ltp * lot
-            pnl = round(value - cost, 2)
+            # qty already represents total contracted shares; lot_size is informational
+            cost  = qty * avg
+            value = qty * ltp
+            pnl   = round(value - cost, 2)
 
             pos = Position(
                 account_id=account_id,
@@ -300,15 +300,18 @@ class MockAdapter(BrokerAdapter):
         seed = self._seed(account_id)
         if not seed:
             return None
+        cash       = seed.get("available_cash", 0.0)
+        used       = seed.get("used_margin", 0.0)
+        collateral = seed.get("total_collateral", 0.0)
         return MarginInfo(
             account_id=account_id,
             broker="mock",
-            available_cash=seed.get("available_cash", 0.0),
-            used_margin=seed.get("used_margin", 0.0),
+            available_cash=cash,
+            used_margin=used,
             span_margin=seed.get("span_margin", 0.0),
             exposure_margin=seed.get("exposure_margin", 0.0),
-            total_collateral=0.0,
-            net_available=seed.get("available_cash", 0.0),
+            total_collateral=collateral,
+            net_available=max(cash + collateral - used, 0.0),
         )
 
     def get_account_summary(self, account_id: str) -> Optional[AccountSummary]:

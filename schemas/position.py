@@ -13,7 +13,7 @@ class Position:
     exchange: str
     product: str            # "MIS" | "NRML" | "CNC"
     instrument_type: str    # "EQ" | "FUT" | "CE" | "PE"
-    quantity: int           # net quantity (+long, -short)
+    quantity: int           # net quantity (+long, -short); already = num_lots × lot_size
     avg_price: float
     ltp: float = 0.0
     pnl: float = 0.0
@@ -23,7 +23,7 @@ class Position:
     sell_quantity: int = 0
     expiry: Optional[str] = None
     strike: Optional[float] = None
-    lot_size: int = 1
+    lot_size: int = 1       # informational only — do NOT use in P&L maths
     tradingsymbol: str = ""
     underlying: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
@@ -36,11 +36,13 @@ class Position:
         self._recompute(self.ltp)
 
     def _recompute(self, ltp: float):
+        # Zerodha's `quantity` is already total contracted shares (num_lots × lot_size).
+        # Do NOT multiply by lot_size again — that would make F&O P&L ~lot_size× too large.
         if ltp > 0:
             self.ltp = ltp
-            self.value = round(self.quantity * ltp * self.lot_size, 2)
-            cost = self.quantity * self.avg_price * self.lot_size
-            self.pnl = round(self.value - cost, 2)
+            self.value = round(self.quantity * ltp, 2)
+            cost       = round(self.quantity * self.avg_price, 2)
+            self.pnl   = round(self.value - cost, 2)
 
     def update_ltp(self, ltp: float):
         self._recompute(ltp)
