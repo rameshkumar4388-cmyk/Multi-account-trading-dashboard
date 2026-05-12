@@ -75,9 +75,14 @@ _FNO_UNDERLYING_RE = re.compile(r"^([A-Z&]+?)(\d{2}[A-Z]{3}|\d{5})")
 
 
 def _extract_underlying(tradingsymbol: str, instrument_type: str) -> str:
-    """Return the underlying asset name from a Zerodha trading symbol."""
-    if instrument_type == "EQ":
-        return tradingsymbol
+    """Return the underlying asset name from a Zerodha trading symbol.
+
+    Always run the regex — pure equity symbols contain no digit-date pattern
+    so they fall through to the tradingsymbol fallback correctly.
+    This also handles the case where instrument_type is missing from the API
+    response and defaults to 'EQ' (the Zerodha positions endpoint sometimes
+    omits this field).
+    """
     m = _FNO_UNDERLYING_RE.match(tradingsymbol)
     return m.group(1) if m else tradingsymbol
 
@@ -256,18 +261,22 @@ class ZerodhaAdapter(BrokerAdapter):
             avg_price   = float(r.get("average_price", 0))
             last_price  = float(r.get("last_price", 0))
             close_price = float(r.get("close_price", 0))
+            # Use close_price when last_price is 0 (halted, pre-market, newly listed)
+            effective_ltp = last_price if last_price > 0 else close_price
+
+            # Broker-computed P&L — Zerodha's direct value, not reconstructed
+            broker_pnl = float(r.get("pnl", 0))
 
             # day_change from Zerodha is per-share price change vs. close_price
             day_change     = float(r.get("day_change", 0))
             day_change_pct = float(r.get("day_change_percentage", 0))
 
             # Fallback: compute day_change from close_price if API returns 0
-            if day_change == 0 and close_price > 0 and last_price > 0:
-                day_change = round(last_price - close_price, 2)
+            if day_change == 0 and close_price > 0 and effective_ltp > 0:
+                day_change = round(effective_ltp - close_price, 2)
                 if close_price > 0:
                     day_change_pct = round((day_change / close_price) * 100, 2)
 
-            is_pledged      = bool(auth_qty > 0 or collat_qty > 0)
             collateral_type = r.get("collateral_type", "")
 
             h = Holding(
@@ -278,21 +287,26 @@ class ZerodhaAdapter(BrokerAdapter):
                 isin=r.get("isin", ""),
                 quantity=total_qty,
                 avg_price=avg_price,
-                ltp=last_price,
+                ltp=effective_ltp,
                 sector=r.get("sector", "Unknown"),
                 instrument_type="EQ",
                 tradingsymbol=r.get("tradingsymbol", ""),
             )
-            h.day_change     = day_change      # per-share price change (₹)
-            h.day_change_pct = day_change_pct  # %
+            h.day_change     = day_change
+            h.day_change_pct = day_change_pct
+
+            # Use broker's direct P&L (ground truth) if provided; our formula is a fallback
+            if broker_pnl:
+                h.pnl = broker_pnl
+                h.pnl_pct = round((broker_pnl / h.invested_value) * 100, 2) if h.invested_value else 0.0
 
             logger.debug(
                 "Holding: %s total=%d "
                 "(free=%d t1=%d auth=%d collat=%d) "
-                "avg=%.2f ltp=%.2f day_chg=%.2f pnl=%.2f ctype=%s",
+                "avg=%.2f ltp=%.2f broker_pnl=%.2f computed_pnl=%.2f",
                 r.get("tradingsymbol"), total_qty,
                 free_qty, t1_qty, auth_qty, collat_qty,
-                avg_price, last_price, day_change, h.pnl, collateral_type or "none",
+                avg_price, effective_ltp, broker_pnl, h.pnl,
             )
             holdings.append(h)
 

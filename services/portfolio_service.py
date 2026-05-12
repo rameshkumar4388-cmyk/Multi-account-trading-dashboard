@@ -179,7 +179,15 @@ class PortfolioService:
         for h in holdings:
             ltp = self._md.get_ltp(h.symbol)
             if ltp and ltp > 0:
+                # Preserve broker P&L — don't let live-LTP recompute overwrite it.
+                # update_ltp() calls _recompute() which would replace h.pnl with
+                # qty × (live_ltp − avg_price), discarding the broker's direct value.
+                saved_pnl     = h.pnl
+                saved_pnl_pct = h.pnl_pct
                 h.update_ltp(ltp)
+                h.pnl     = saved_pnl
+                h.pnl_pct = saved_pnl_pct
+
                 # day_change must stay as PER-SHARE price change (not total value).
                 # It will be multiplied by quantity in the summary aggregation.
                 fresh_change     = self._md.get_change(h.symbol)
