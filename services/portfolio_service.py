@@ -177,6 +177,8 @@ class PortfolioService:
 
     def _inject_ltp_holdings(self, holdings: List[Holding]) -> List[Holding]:
         for h in holdings:
+            if h.instrument_type == "MF":
+                continue   # MF NAVs are EOD-only; no live quote injection
             ltp = self._md.get_ltp(h.symbol)
             if ltp and ltp > 0:
                 h.update_ltp(ltp)

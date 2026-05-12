@@ -12,7 +12,7 @@ class Holding:
     symbol: str
     exchange: str           # "NSE" | "BSE"
     isin: str
-    quantity: int
+    quantity: float          # float supports fractional ETF/MF units
     avg_price: float
     ltp: float = 0.0
     current_value: float = 0.0

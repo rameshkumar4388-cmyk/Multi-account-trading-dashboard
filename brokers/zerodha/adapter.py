@@ -201,35 +201,35 @@ class ZerodhaAdapter(BrokerAdapter):
     # ------------------------------------------------------------------
 
     def get_holdings(self, account_id: str) -> List[Holding]:
+        equity = self._get_equity_holdings(account_id)
+        mf     = self._get_mf_holdings(account_id)
+        return equity + mf
+
+    def _get_equity_holdings(self, account_id: str) -> List[Holding]:
         try:
             raw = self._kite(account_id).holdings()
         except Exception as exc:
             logger.error("get_holdings failed for '%s': %s", account_id, exc)
             return []
 
-        # Permanent marker — confirms the active code version in server logs.
-        # "v5-field" means: free+t1+auth+max(collateral,used)+opening_fallback
-        logger.info(
-            "get_holdings '%s': %d raw rows [qty-formula=v5-field: "
-            "free+t1+auth+max(collat,used)+opening_fallback]",
-            account_id, len(raw),
-        )
+        logger.info("get_holdings '%s': %d equity rows", account_id, len(raw))
 
         holdings: List[Holding] = []
         for r in raw:
             # ── Ownership quantity ─────────────────────────────────────
             #
-            # quantity            = free/tradeable (can sell today)
+            # quantity            = free/tradeable (can sell today); float for
+            #                       fractional ETF units (e.g. LIQUIDBEES-F)
             # t1_quantity         = T+1 pending settlement
             # authorised_quantity = pledge initiated, CDSL OTP not done yet
             # collateral_quantity = pledge approved and active (v3 canonical)
             #
             # opening_quantity    = stale session-open snapshot; last-resort
             #                       fallback only when all other fields are 0.
-            free_qty    = int(r.get("quantity", 0)            or 0)
-            t1_qty      = int(r.get("t1_quantity", 0)         or 0)
-            auth_qty    = int(r.get("authorised_quantity", 0) or 0)
-            collat_qty  = int(r.get("collateral_quantity", 0) or 0)
+            free_qty    = float(r.get("quantity", 0)            or 0)
+            t1_qty      = float(r.get("t1_quantity", 0)         or 0)
+            auth_qty    = float(r.get("authorised_quantity", 0) or 0)
+            collat_qty  = float(r.get("collateral_quantity", 0) or 0)
             # collateral_quantity is the canonical pledged-shares field (v3 API).
             # Do not mix in used_quantity — it is a margin-utilisation indicator,
             # not a separate block of shares, and would cause double-counting.
@@ -250,11 +250,11 @@ class ZerodhaAdapter(BrokerAdapter):
 
             if total_qty <= 0:
                 logger.debug(
-                    "Skipping %s: free=%d t1=%d auth=%d collat=%d "
-                    "opening=%d — all zero",
+                    "Skipping %s: free=%.4f t1=%.4f auth=%.4f collat=%.4f "
+                    "opening=%.4f — all zero",
                     r.get("tradingsymbol"),
                     free_qty, t1_qty, auth_qty, collat_qty,
-                    int(r.get("opening_quantity", 0) or 0),
+                    float(r.get("opening_quantity", 0) or 0),
                 )
                 continue
 
@@ -299,8 +299,8 @@ class ZerodhaAdapter(BrokerAdapter):
             # Do NOT override with the API pnl field — it uses EOD close prices.
 
             logger.debug(
-                "Holding: %s total=%d "
-                "(free=%d t1=%d auth=%d collat=%d) "
+                "Holding: %s total=%.4f "
+                "(free=%.4f t1=%.4f auth=%.4f collat=%.4f) "
                 "avg=%.2f ltp=%.2f pnl=%.2f",
                 r.get("tradingsymbol"), total_qty,
                 free_qty, t1_qty, auth_qty, collat_qty,
@@ -308,10 +308,71 @@ class ZerodhaAdapter(BrokerAdapter):
             )
             holdings.append(h)
 
-        logger.info(
-            "get_holdings '%s': %d holdings loaded (total qty across all)",
-            account_id, len(holdings),
-        )
+        logger.info("get_holdings '%s': %d equity holdings", account_id, len(holdings))
+        return holdings
+
+    def _get_mf_holdings(self, account_id: str) -> List[Holding]:
+        """Fetch mutual fund holdings via kite.mf_holdings() and return as Holding objects."""
+        try:
+            raw = self._kite(account_id).mf_holdings()
+        except Exception as exc:
+            logger.warning("mf_holdings '%s': not available or failed: %s", account_id, exc)
+            return []
+
+        if not raw:
+            return []
+
+        logger.info("mf_holdings '%s': %d MF rows", account_id, len(raw))
+        holdings: List[Holding] = []
+
+        for r in raw:
+            # KiteConnect mf_holdings() returns quantity = free units only;
+            # pledged units are in a separate field.  Log the raw row on first
+            # run so we can verify field names against the live payload.
+            logger.debug("MF raw row: %s", {k: v for k, v in r.items()
+                                             if k in ("tradingsymbol", "fund", "quantity",
+                                                      "pledged_quantity", "t1_quantity",
+                                                      "average_price", "last_price", "pnl")})
+            free_qty    = float(r.get("quantity", 0)           or 0)
+            pledged_qty = float(r.get("pledged_quantity", 0)   or 0)
+            t1_qty      = float(r.get("t1_quantity", 0)        or 0)
+            total_qty   = free_qty + pledged_qty + t1_qty
+
+            if total_qty <= 0:
+                continue
+
+            avg_price  = float(r.get("average_price", 0) or 0)
+            last_price = float(r.get("last_price", 0)    or 0)
+
+            # Trading symbol for MF: prefer tradingsymbol, fall back to ISIN or fund name
+            tradingsymbol = (
+                r.get("tradingsymbol") or r.get("isin") or r.get("fund", "")
+            )
+            fund_name = r.get("fund", tradingsymbol)
+
+            h = Holding(
+                account_id=account_id,
+                broker="zerodha",
+                symbol=tradingsymbol,
+                exchange="MF",          # distinguishes MF from equity in all downstream logic
+                isin=r.get("isin", ""),
+                quantity=total_qty,
+                avg_price=avg_price,
+                ltp=last_price,         # NAV — EOD only; no live injection attempted
+                sector="Mutual Funds",
+                instrument_type="MF",
+                tradingsymbol=tradingsymbol,
+            )
+            # Store full fund name so UI can display it
+            h._fund_name = fund_name
+
+            logger.debug(
+                "MF holding: %s qty=%.4f avg=%.4f nav=%.4f pnl=%.2f",
+                tradingsymbol, total_qty, avg_price, last_price, h.pnl,
+            )
+            holdings.append(h)
+
+        logger.info("mf_holdings '%s': %d MF holdings loaded", account_id, len(holdings))
         return holdings
 
     # ------------------------------------------------------------------

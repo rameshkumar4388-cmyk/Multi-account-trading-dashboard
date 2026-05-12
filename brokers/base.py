@@ -71,7 +71,10 @@ class BrokerAdapter(ABC):
         """
         symbols: List[str] = []
         for h in self.get_holdings(account_id):
-            symbols.append(h.symbol)   # plain name; ZerodhaQuoteFeed._to_instrument() adds exchange prefix
+            if h.instrument_type != "MF":   # MF NAVs are EOD-only — no live feed
+                symbols.append(h.symbol)
         for p in self.get_positions(account_id):
-            symbols.append(p.symbol)
+            symbols.append(p.symbol)        # F&O contract (e.g. RELIANCE26MAY1300PE)
+            if p.underlying and p.underlying != p.symbol:
+                symbols.append(p.underlying)  # underlying equity/index for the LTP chip display
         return list(dict.fromkeys(symbols))   # deduplicate, preserve order
