@@ -40,6 +40,11 @@ class AppSettings:
     market_data_refresh_interval: int = 5
     ui_refresh_interval: int = 5
     accounts: List[AccountConfig] = field(default_factory=list)
+    # Account whose KiteConnect session is used exclusively for all market-data
+    # calls (LTP, quotes, index prices, WebSocket ticks).  Must be a paid Kite
+    # Connect account with live data entitlement.  Other accounts are NEVER used
+    # for market data even if they have valid sessions.
+    market_data_account_id: Optional[str] = None
 
 
 def _is_placeholder(value: str) -> bool:
@@ -221,6 +226,21 @@ def load_settings() -> AppSettings:
     else:
         accounts = _mock_accounts()
 
+    # Market-data authority: SP7086 is the paid Kite Connect account used
+    # exclusively for all LTP/quote/index calls.  Read from env; default to
+    # zerodha_sp7086.  Warn explicitly if the resolved ID is not in the
+    # loaded account list so the error surfaces at startup, not at runtime.
+    _DEFAULT_MD_ACCOUNT = "zerodha_sp7086"
+    md_account_id = os.getenv("MARKET_DATA_ACCOUNT_ID", "").strip() or _DEFAULT_MD_ACCOUNT
+    if mode == "live":
+        account_ids = {a.account_id for a in accounts}
+        if md_account_id not in account_ids:
+            logger.warning(
+                "MARKET_DATA_ACCOUNT_ID '%s' not found in configured accounts %s. "
+                "Quote fetching will fail until this account authenticates.",
+                md_account_id, sorted(account_ids),
+            )
+
     return AppSettings(
         app_mode=mode,
         db_path=db_path,
@@ -228,4 +248,5 @@ def load_settings() -> AppSettings:
         market_data_refresh_interval=int(os.getenv("MARKET_DATA_REFRESH_INTERVAL", 5)),
         ui_refresh_interval=5,
         accounts=accounts,
+        market_data_account_id=md_account_id,
     )
