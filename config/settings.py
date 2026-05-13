@@ -156,6 +156,22 @@ def _mock_accounts() -> List[AccountConfig]:
             enabled=True,
             metadata={"original_broker": "groww", "account_type": "investment"},
         ),
+        AccountConfig(
+            account_id="zerodha_fxu722",
+            broker="mock",
+            display_name="Zerodha (FXU722)",
+            owner="Ramesh Kumar",
+            enabled=True,
+            metadata={"original_broker": "zerodha", "account_type": "individual"},
+        ),
+        AccountConfig(
+            account_id="zerodha_da1898",
+            broker="mock",
+            display_name="Zerodha (DA1898)",
+            owner="Ramesh Kumar",
+            enabled=True,
+            metadata={"original_broker": "zerodha", "account_type": "individual"},
+        ),
     ]
 
 
