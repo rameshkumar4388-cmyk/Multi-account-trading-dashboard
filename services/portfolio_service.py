@@ -197,4 +197,12 @@ class PortfolioService:
             ltp = self._md.get_ltp(p.symbol)
             if ltp and ltp > 0:
                 p.update_ltp(ltp)
+                # Recompute day_pnl from fresh ohlc close so it never lags the
+                # broker TTL cache.  NRML/CNC: baseline = previous-day settle.
+                # MIS (intraday): baseline = avg_price (no overnight component).
+                close = self._md.get_close(p.symbol)
+                if p.product == "MIS":
+                    p.day_pnl = round((ltp - p.avg_price) * p.quantity, 2)
+                elif close and close > 0:
+                    p.day_pnl = round((ltp - close) * p.quantity, 2)
         return positions

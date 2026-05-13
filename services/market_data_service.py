@@ -6,8 +6,12 @@ on-demand batch fetch via SP7086's KiteConnect session.
 
 Data flow per render cycle (orchestrated by main.py):
   1. _build_quote_symbols() collects all needed symbols from cached data
-  2. md_svc.refresh(symbols) calls kite.ltp(all_instruments) once via SP7086
-  3. All get_ltp() calls within the same render read from that snapshot
+  2. md_svc.refresh(symbols) calls kite.ohlc(all_instruments) once via SP7086
+  3. All get_ltp()/get_change()/get_close() calls read from that snapshot
+
+kite.ohlc() is used instead of kite.ltp() because it returns both
+last_price AND ohlc.close (previous-day settlement price) in one call,
+enabling local computation of change, change_pct, and positions day_pnl.
 
 SP7086 is the ONLY account used for any quote/LTP/index call.
 Other Zerodha accounts (VU5420, CL0502, FXU722, DA1898) never touch this.
@@ -70,6 +74,7 @@ class MarketDataService:
         self._settings = settings
         self._account_svc = account_svc
         self._prices: Dict[str, float] = {}
+        self._closes: Dict[str, float] = {}   # previous-day close from ohlc()
 
     # ------------------------------------------------------------------
     # Core refresh — called once per render cycle by main.py
@@ -77,9 +82,10 @@ class MarketDataService:
 
     def refresh(self, symbols: List[str]) -> None:
         """
-        Fetch LTPs for all symbols in one batched kite.ltp() call via SP7086.
-        Atomically replaces the internal snapshot; all get_ltp() calls then
-        read from it. Batched in groups of 500 (Zerodha API limit).
+        Fetch quotes for all symbols via kite.ohlc() in one batched call via SP7086.
+        ohlc() returns last_price + previous-day close, enabling local computation
+        of change, change_pct, and positions day_pnl without relying on stale
+        broker-cached fields. Batched in groups of 200 (Zerodha ohlc limit).
         """
         if not symbols:
             return
@@ -100,32 +106,40 @@ class MarketDataService:
         instrument_map = dict(zip(instruments, symbols))
 
         new_prices: Dict[str, float] = {}
-        for i in range(0, len(instruments), 500):
-            batch = instruments[i:i + 500]
+        new_closes: Dict[str, float] = {}
+        for i in range(0, len(instruments), 200):
+            batch = instruments[i:i + 200]
             try:
-                data = kite.ltp(batch)
+                data = kite.ohlc(batch)
                 for inst, info in data.items():
                     plain = instrument_map.get(inst, inst.split(":")[-1])
-                    ltp = float(info.get("last_price", 0))
+                    ltp   = float(info.get("last_price", 0))
+                    close = float((info.get("ohlc") or {}).get("close", 0))
                     if ltp > 0:
                         new_prices[plain] = ltp
+                    if close > 0:
+                        new_closes[plain] = close
             except Exception as exc:
                 logger.warning(
-                    "kite.ltp() batch [%d symbols] failed: %s", len(batch), exc
+                    "kite.ohlc() batch [%d symbols] failed: %s", len(batch), exc
                 )
 
         self._prices = new_prices
+        self._closes = new_closes
         logger.debug(
-            "MarketDataService.refresh: %d / %d prices fetched",
-            len(new_prices), len(symbols),
+            "MarketDataService.refresh: %d prices, %d closes fetched",
+            len(new_prices), len(new_closes),
         )
 
     def _mock_refresh(self, symbols: List[str]) -> None:
         new_prices: Dict[str, float] = {}
+        new_closes: Dict[str, float] = {}
         for sym in symbols:
             base = _MOCK_BASE.get(sym, 100.0)
             new_prices[sym] = round(base * (1 + random.gauss(0, 0.004)), 2)
+            new_closes[sym] = base   # stable "yesterday's close" for consistent mock changes
         self._prices = new_prices
+        self._closes = new_closes
 
     # ------------------------------------------------------------------
     # Price accessors — O(1) reads from snapshot
@@ -135,12 +149,22 @@ class MarketDataService:
         return self._prices.get(symbol)
 
     def get_change(self, symbol: str) -> float:
-        # kite.ltp() returns last_price only; change is not available.
-        # Holdings carry day_change from the holdings API; positions carry m2m.
+        ltp   = self._prices.get(symbol)
+        close = self._closes.get(symbol)
+        if ltp and close:
+            return round(ltp - close, 2)
         return 0.0
 
     def get_change_pct(self, symbol: str) -> float:
+        ltp   = self._prices.get(symbol)
+        close = self._closes.get(symbol)
+        if ltp and close:
+            return round((ltp - close) / close * 100, 2)
         return 0.0
+
+    def get_close(self, symbol: str) -> Optional[float]:
+        """Return previous-day close price for local day_pnl recomputation."""
+        return self._closes.get(symbol)
 
     def get_all_prices(self) -> Dict[str, float]:
         return dict(self._prices)
