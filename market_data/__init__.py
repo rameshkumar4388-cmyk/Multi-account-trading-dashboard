@@ -1,3 +1,2 @@
-from market_data.manager import MarketDataManager
-
-__all__ = ["MarketDataManager"]
+# market_data package — background feed layer removed.
+# MarketDataService now handles all quote fetching synchronously.

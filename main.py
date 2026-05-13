@@ -67,17 +67,7 @@ def _get_account_service(_settings, _db):
 
 @st.cache_resource
 def _get_market_data_service(_settings, _account_svc):
-    svc = MarketDataService(_settings)
-    symbols = _account_svc.get_all_symbols()
-    # Always subscribe key indices so NIFTY/BANKNIFTY cards have live data
-    for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY"):
-        if idx not in symbols:
-            symbols.insert(0, idx)
-    svc.initialize(symbols)
-    if _settings.app_mode == "live":
-        sessions = _account_svc.get_kite_sessions()
-        svc.attach_zerodha_feed(sessions, symbols)
-    return svc
+    return MarketDataService(_settings, _account_svc)
 
 
 @st.cache_resource
@@ -88,6 +78,31 @@ def _get_portfolio_service(_account_svc, _md_svc):
 @st.cache_resource
 def _get_aggregation_service(_account_svc, _portfolio_svc):
     return AggregationService(_account_svc, _portfolio_svc)
+
+
+def _build_quote_symbols(aggregation_svc) -> list:
+    """
+    Collect every symbol that needs a live quote this render cycle.
+
+    Calls get_combined_positions() and get_combined_holdings() which are
+    TTL-cached in PortfolioService (30 s), so broker API calls only fire
+    when the cache is cold — not on every Streamlit rerun.
+    """
+    symbols: set = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+    try:
+        for p in aggregation_svc.get_combined_positions():
+            symbols.add(p.symbol)
+            if p.underlying and p.underlying != p.symbol:
+                symbols.add(p.underlying)
+    except Exception:
+        pass
+    try:
+        for h in aggregation_svc.get_combined_holdings():
+            if h.instrument_type != "MF":
+                symbols.add(h.symbol)
+    except Exception:
+        pass
+    return list(symbols)
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────
@@ -125,6 +140,13 @@ def main():
     account_health = account_svc.get_health()
 
     view, selected_account = render_sidebar(settings, account_ids, account_health)
+
+    # ── Fresh quote snapshot ──────────────────────────────────────────
+    # Build symbol set (populates portfolio TTL cache as a side effect),
+    # then fetch all prices in ONE batched kite.ltp() call via SP7086.
+    # Must happen before get_combined_metrics() so LTP injection sees
+    # fresh quotes when portfolio_svc recomputes summaries from cache.
+    md_svc.refresh(_build_quote_symbols(aggregation_svc))
 
     # ── Header ────────────────────────────────────────────────────────
     try:
