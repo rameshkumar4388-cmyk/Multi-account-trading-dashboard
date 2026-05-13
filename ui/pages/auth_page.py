@@ -22,7 +22,14 @@ from typing import Optional
 
 import streamlit as st
 
+from ui.account_order import sort_account_ids
+
 logger = logging.getLogger(__name__)
+
+# Survives across Streamlit sessions (tabs) in the same server process.
+# Written whenever the reconnect dropdown changes; read by handle_oauth_redirect
+# when the OAuth redirect arrives in a fresh tab with no session state.
+_PENDING_AUTH: dict = {}
 
 
 def _exchange_token(api_key: str, api_secret: str, request_token: str) -> Optional[str]:
@@ -52,13 +59,19 @@ def handle_oauth_redirect(account_svc, settings) -> bool:
     if not request_token or status != "success":
         return False
 
-    # Find the account whose api_key matches what we configured
-    # (In multi-account setups, we match by account_id stored in session state)
-    target_account = st.session_state.get("auth_target_account")
+    # Session state is absent when the OAuth redirect lands in a new browser tab.
+    # _PENDING_AUTH (module-level, process-shared) bridges that gap.
+    target_account = (
+        st.session_state.get("auth_target_account")
+        or _PENDING_AUTH.get("account_id")
+    )
 
     if not target_account:
-        # Single-account: pick the first live Zerodha account
-        all_ids = list(account_svc._account_configs.keys())
+        # Last resort: canonical order so SP7086 is first, not a random dict order.
+        all_ids = sort_account_ids(
+            list(account_svc._account_configs.keys()),
+            account_svc._account_configs,
+        )
         zerodha_ids = [
             aid for aid in all_ids
             if account_svc._account_configs[aid].broker == "zerodha"
@@ -74,10 +87,7 @@ def handle_oauth_redirect(account_svc, settings) -> bool:
         return False
 
     api_key    = cfg.credentials.get("api_key", "")
-    api_secret = settings.accounts[0].credentials.get("api_secret", "") if settings.accounts else ""
-
-    # Prefer per-account secret
-    api_secret = cfg.credentials.get("api_secret", api_secret)
+    api_secret = cfg.credentials.get("api_secret", "")
 
     if not api_secret:
         st.error(
@@ -169,11 +179,14 @@ def render(account_svc, settings, portfolio_svc=None):
 
     # ── Login flow ────────────────────────────────────────────────────
     # Select which account to reconnect (for multi-account setups)
-    zerodha_accounts = [
-        aid for aid in all_account_ids
-        if account_svc._account_configs.get(aid, {}) and
-           account_svc._account_configs[aid].broker == "zerodha"
-    ]
+    zerodha_accounts = sort_account_ids(
+        [
+            aid for aid in all_account_ids
+            if account_svc._account_configs.get(aid, {}) and
+               account_svc._account_configs[aid].broker == "zerodha"
+        ],
+        account_svc._account_configs,
+    )
 
     if not zerodha_accounts:
         st.info("No Zerodha accounts configured. Set KITE_API_KEY in .env and restart.")
@@ -190,6 +203,7 @@ def render(account_svc, settings, portfolio_svc=None):
         )
 
     st.session_state["auth_target_account"] = target_id
+    _PENDING_AUTH["account_id"] = target_id   # survives cross-tab redirect
     cfg = account_svc._account_configs.get(target_id)
     api_key = cfg.credentials.get("api_key", "") if cfg else ""
 

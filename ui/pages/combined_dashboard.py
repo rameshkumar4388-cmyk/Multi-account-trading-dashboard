@@ -89,11 +89,13 @@ def _index_card_html(label: str, ltp: float, chg: float, pct: float) -> str:
     )
 
 
-def _render_index_cards_impl(md_service):
+def _render_index_cards_impl(md_service, positions=None):
+    # Fallback: derive index LTP from positions broker data (same source as positions table)
+    _ul = {p.underlying: p.ltp for p in (positions or []) if p.underlying and p.ltp}
     pairs = [("NIFTY", "NIFTY 50"), ("BANKNIFTY", "NIFTY BANK")]
     cols  = st.columns(2, gap="medium")
     for col, (sym, label) in zip(cols, pairs):
-        ltp = md_service.get_ltp(sym) or 0.0
+        ltp = md_service.get_ltp(sym) or _ul.get(sym, 0.0)
         chg = md_service.get_change(sym) or 0.0
         pct = md_service.get_change_pct(sym) or 0.0
         with col:
@@ -104,14 +106,14 @@ def _render_index_cards_impl(md_service):
 if _HAS_FRAGMENT:
     try:
         @st.fragment(run_every=3)
-        def _render_index_cards(md_service):
-            _render_index_cards_impl(md_service)
+        def _render_index_cards(md_service, positions=None):
+            _render_index_cards_impl(md_service, positions)
     except Exception:
-        def _render_index_cards(md_service):
-            _render_index_cards_impl(md_service)
+        def _render_index_cards(md_service, positions=None):
+            _render_index_cards_impl(md_service, positions)
 else:
-    def _render_index_cards(md_service):
-        _render_index_cards_impl(md_service)
+    def _render_index_cards(md_service, positions=None):
+        _render_index_cards_impl(md_service, positions)
 
 
 # ── combined summary bar ──────────────────────────────────────────────
@@ -341,7 +343,7 @@ def render(
 
     # ── 1. Index cards (fragment-refreshed independently when possible) ─
     if md_service:
-        _render_index_cards(md_service)
+        _render_index_cards(md_service, positions)
         st.markdown("<div style='margin-bottom:14px;'></div>", unsafe_allow_html=True)
 
     # ── 2. Combined summary bar ────────────────────────────────────────
