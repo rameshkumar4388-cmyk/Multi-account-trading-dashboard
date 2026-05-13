@@ -277,6 +277,41 @@ class AccountService:
                 sessions[aid] = session
         return sessions
 
+    def get_market_data_kite_session(self) -> Optional[object]:
+        """
+        Return the KiteConnect session for the market-data authority account.
+
+        This is the ONLY session that should ever be used for quote/LTP/index/
+        WebSocket calls.  It is determined by settings.market_data_account_id
+        (set via MARKET_DATA_ACCOUNT_ID env var) and must correspond to a paid
+        Kite Connect account with live data entitlement (SP7086).
+
+        Returns None only if the designated account is not yet authenticated —
+        never silently falls back to another account.
+        """
+        mid = self._settings.market_data_account_id
+        if not mid:
+            logger.error(
+                "get_market_data_kite_session: MARKET_DATA_ACCOUNT_ID not configured"
+            )
+            return None
+
+        adapter = self._adapters.get(mid)
+        if adapter is None:
+            logger.error(
+                "get_market_data_kite_session: market-data account '%s' is not "
+                "authenticated (check credentials / token)",
+                mid,
+            )
+            return None
+
+        session = adapter.get_kite_session(mid)
+        if session is None:
+            logger.error(
+                "get_market_data_kite_session: no KiteConnect session for '%s'", mid
+            )
+        return session
+
     def get_all_symbols(self) -> List[str]:
         symbols: List[str] = []
         for aid, adapter in self._adapters.items():
