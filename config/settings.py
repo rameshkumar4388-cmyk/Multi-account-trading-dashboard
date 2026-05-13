@@ -168,8 +168,8 @@ def _load_kite_single_account_from_env() -> List[AccountConfig]:
     This is an alternative to ZERODHA_<TAG>_* for setups with one account.
     Also accepts ZERODHA_API_KEY / ZERODHA_ACCESS_TOKEN (no tag) as aliases.
     """
-    for prefix, acct_id, default_name in [
-        ("KITE",    "zerodha_kite",    "Zerodha"),
+    for prefix, default_acct_id, default_name in [
+        ("KITE",    "zerodha_sp7086", "Zerodha"),
         ("ZERODHA", "zerodha_primary", "Zerodha"),
     ]:
         api_key      = os.getenv(f"{prefix}_API_KEY", "").strip()
@@ -180,6 +180,10 @@ def _load_kite_single_account_from_env() -> List[AccountConfig]:
 
         if _is_placeholder(api_key) or _is_placeholder(access_token):
             continue
+
+        # Derive canonical account_id from user_id (SP7086 → zerodha_sp7086) so
+        # flat KITE_* credentials produce the same id as ZERODHA_SP7086_* would.
+        acct_id = f"zerodha_{user_id.lower()}" if user_id else default_acct_id
 
         logger.info("Registered account via %s_* env vars: %s", prefix, acct_id)
         return [AccountConfig(
