@@ -468,35 +468,50 @@ class ZerodhaAdapter(BrokerAdapter):
         try:
             funds = self._kite(account_id).margins()
         except Exception as exc:
-            logger.error("get_margin failed for '%s': %s", account_id, exc)
+            logger.error("get_margin '%s' API call failed: %s", account_id, exc)
             return None
 
-        equity    = funds.get("equity", {})
+        equity = funds.get("equity", {})
+        if not equity:
+            logger.warning(
+                "get_margin '%s': 'equity' key missing from margins() response "
+                "(got keys: %s) — cash will show ₹0",
+                account_id, list(funds.keys()),
+            )
+
         available = equity.get("available", {})
         utilised  = equity.get("utilised", {})
 
-        # Direct API values — no derivation
-        cash       = float(available.get("cash", 0))        # pure cash
-        collateral = float(available.get("collateral", 0))  # pledged holdings (post-haircut)
+        # live_balance = opening_balance + intraday_payin − payout: the full
+        # available amount regardless of when funds were transferred.
+        # cash = opening_balance only: newly transferred funds appear in
+        # live_balance first; for new/recently-funded accounts cash may be 0
+        # while live_balance shows the correct balance.  Use live_balance as
+        # primary, fall back to cash for accounts where live_balance is absent.
+        live_balance = float(available.get("live_balance", 0))
+        cash         = float(available.get("cash", 0))
+        available_cash = live_balance if live_balance > 0 else cash
 
+        collateral     = float(available.get("collateral", 0))
         debits         = float(utilised.get("debits", 0))
         span           = float(utilised.get("span", 0))
         exposure       = float(utilised.get("exposure", 0))
         option_premium = float(utilised.get("option_premium", 0))
 
-        # Available Margin = Cash + Collateral (gross, before deducting used margin)
-        net_available_val = round(cash + collateral, 2)
+        # net_available = what is actually usable after margin is blocked
+        net_available_val = max(round(available_cash + collateral - debits, 2), 0.0)
 
-        logger.debug(
-            "get_margin '%s': cash=%.2f collateral=%.2f "
-            "available=%.2f debits=%.2f",
-            account_id, cash, collateral, net_available_val, debits,
+        logger.info(
+            "get_margin '%s': live_balance=%.2f cash=%.2f collateral=%.2f "
+            "debits=%.2f → available_cash=%.2f net_available=%.2f",
+            account_id, live_balance, cash, collateral,
+            debits, available_cash, net_available_val,
         )
 
         return MarginInfo(
             account_id=account_id,
             broker="zerodha",
-            available_cash=cash,
+            available_cash=available_cash,
             net_available=net_available_val,
             used_margin=debits,
             total_collateral=collateral,
