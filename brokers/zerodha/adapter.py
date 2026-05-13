@@ -65,6 +65,100 @@ from schemas.position import Position
 
 logger = logging.getLogger(__name__)
 
+# Zerodha's holdings() API does not return a sector field.
+# This static lookup maps NSE tradingsymbol → sector for common stocks.
+# Unknown symbols fall through to "Other" — accurate and user-friendly.
+_NSE_SECTOR: Dict[str, str] = {
+    # Banking
+    "HDFCBANK": "Banking", "ICICIBANK": "Banking", "SBIN": "Banking",
+    "KOTAKBANK": "Banking", "AXISBANK": "Banking", "INDUSINDBK": "Banking",
+    "BANDHANBNK": "Banking", "FEDERALBNK": "Banking", "RBLBANK": "Banking",
+    "PNB": "Banking", "BANKBARODA": "Banking", "UNIONBANK": "Banking",
+    "CANBK": "Banking", "IDFCFIRSTB": "Banking", "AUBANK": "Banking",
+    "YESBANK": "Banking", "KARURVYSYA": "Banking", "CUB": "Banking",
+    "DCBBANK": "Banking", "SOUTHBANK": "Banking",
+    # NBFC
+    "BAJFINANCE": "NBFC", "BAJAJFINSV": "NBFC", "MUTHOOTFIN": "NBFC",
+    "CHOLAFIN": "NBFC", "MANAPPURAM": "NBFC", "M&MFIN": "NBFC",
+    "SHRIRAMFIN": "NBFC", "POONAWALLA": "NBFC",
+    # Finance & Insurance
+    "PFC": "Finance", "RECLTD": "Finance", "IRFC": "Finance",
+    "HDFCLIFE": "Insurance", "SBILIFE": "Insurance", "ICICIGI": "Insurance",
+    "LICI": "Insurance", "STARHEALTH": "Insurance", "MFSL": "Finance",
+    # IT
+    "TCS": "IT", "INFY": "IT", "WIPRO": "IT", "HCLTECH": "IT",
+    "TECHM": "IT", "LTIM": "IT", "MPHASIS": "IT", "COFORGE": "IT",
+    "PERSISTENT": "IT", "LTTS": "IT", "TATAELXSI": "IT", "KPIT": "IT",
+    "HEXAWARE": "IT", "NIIT": "IT", "ZENSAR": "IT", "ORACLE": "IT",
+    # Energy & Oil
+    "RELIANCE": "Energy", "ONGC": "Energy", "BPCL": "Energy",
+    "IOC": "Energy", "HINDPETRO": "Energy", "CASTROLIND": "Energy",
+    "GAIL": "Energy", "PETRONET": "Energy", "MGL": "Energy", "IGL": "Energy",
+    "AEGASIND": "Energy",
+    # Auto & Ancillaries
+    "MARUTI": "Auto", "TATAMOTORS": "Auto", "M&M": "Auto",
+    "BAJAJ-AUTO": "Auto", "HEROMOTOCO": "Auto", "EICHERMOT": "Auto",
+    "TVSMOTORS": "Auto", "ASHOKLEY": "Auto", "BALKRISIND": "Auto",
+    "MOTHERSON": "Auto", "BOSCHLTD": "Auto", "MRF": "Auto",
+    "APOLLOTYRE": "Auto", "CEATLTD": "Auto", "EXIDEIND": "Auto",
+    "AMARAJABAT": "Auto",
+    # Consumer / FMCG
+    "HINDUNILVR": "Consumer", "ITC": "Consumer", "NESTLEIND": "Consumer",
+    "BRITANNIA": "Consumer", "ASIANPAINT": "Consumer", "DABUR": "Consumer",
+    "MARICO": "Consumer", "GODREJCP": "Consumer", "COLPAL": "Consumer",
+    "EMAMILTD": "Consumer", "TATACONSUM": "Consumer", "BERGEPAINT": "Consumer",
+    "VBL": "Consumer", "RADICO": "Consumer", "MCDOWELL-N": "Consumer",
+    "UBL": "Consumer", "JUBLFOOD": "Consumer", "WESTLIFE": "Consumer",
+    "PAGEIND": "Consumer", "TITAN": "Consumer", "TRENT": "Consumer",
+    "DMART": "Consumer", "VARUNBEV": "Consumer",
+    # Pharma & Healthcare
+    "SUNPHARMA": "Pharma", "DRREDDY": "Pharma", "CIPLA": "Pharma",
+    "DIVISLAB": "Pharma", "AUROPHARMA": "Pharma", "TORNTPHARM": "Pharma",
+    "ALKEM": "Pharma", "LUPIN": "Pharma", "BIOCON": "Pharma",
+    "GLENMARK": "Pharma", "ZYDUSLIFE": "Pharma", "IPCALAB": "Pharma",
+    "APOLLOHOSP": "Healthcare", "LALPATHLAB": "Healthcare",
+    "METROPOLIS": "Healthcare", "MAXHEALTH": "Healthcare",
+    # Metals & Mining
+    "TATASTEEL": "Metals", "JSWSTEEL": "Metals", "HINDALCO": "Metals",
+    "VEDL": "Metals", "NMDC": "Mining", "COALINDIA": "Mining",
+    "SAIL": "Metals", "JSPL": "Metals", "HINDCOPPER": "Metals",
+    "NATIONALUM": "Metals", "MOIL": "Mining",
+    # Infrastructure & Capital Goods
+    "LT": "Infrastructure", "SIEMENS": "Capital Goods", "ABB": "Capital Goods",
+    "ADANIPORTS": "Infrastructure", "GMRINFRA": "Infrastructure",
+    "BHEL": "Capital Goods", "THERMAX": "Capital Goods",
+    "CUMMINSIND": "Capital Goods", "KEC": "Capital Goods",
+    "HAL": "Defence", "BEL": "Defence", "BEML": "Defence",
+    # Utilities
+    "POWERGRID": "Utilities", "NTPC": "Utilities", "TATAPOWER": "Utilities",
+    "ADANIGREEN": "Utilities", "ADANIPOWER": "Utilities", "NHPC": "Utilities",
+    "TORNTPOWER": "Utilities", "RPOWER": "Utilities", "CESC": "Utilities",
+    "SJVN": "Utilities",
+    # Telecom
+    "BHARTIARTL": "Telecom", "IDEA": "Telecom", "TATACOMM": "Telecom",
+    # Cement
+    "ULTRACEMCO": "Cement", "SHREECEM": "Cement", "AMBUJACEMENT": "Cement",
+    "ACC": "Cement", "JKCEMENT": "Cement", "RAMCOCEM": "Cement",
+    # Chemicals
+    "PIDILITIND": "Chemicals", "DEEPAKNTR": "Chemicals", "AARTIIND": "Chemicals",
+    "NAVINFLUOR": "Chemicals", "ALKYLAMINE": "Chemicals", "VINATI": "Chemicals",
+    "FLUOROCHEM": "Chemicals", "CLEAN": "Chemicals",
+    # Conglomerates
+    "ADANIENT": "Conglomerate", "GRASIM": "Conglomerate",
+    # Real Estate
+    "DLF": "Real Estate", "GODREJPROP": "Real Estate",
+    "OBEROIRLTY": "Real Estate", "PRESTIGE": "Real Estate",
+    "PHOENIXLTD": "Real Estate", "SOBHA": "Real Estate",
+    # Technology / New-age
+    "ZOMATO": "Technology", "NYKAA": "Technology", "PAYTM": "Technology",
+    # Travel & Logistics
+    "IRCTC": "Travel", "INDIGO": "Aviation", "CONCOR": "Logistics",
+    "BLUEDART": "Logistics",
+    # Media
+    "SUNTV": "Media", "ZEEL": "Media", "PVRINOX": "Media",
+}
+
+
 # Regex to isolate the underlying name from an F&O trading symbol.
 # Zerodha format examples:
 #   NIFTY25JUNFUT       → NIFTY
@@ -287,15 +381,15 @@ class ZerodhaAdapter(BrokerAdapter):
                 quantity=total_qty,
                 avg_price=avg_price,
                 ltp=effective_ltp,
-                sector=r.get("sector", "Unknown"),
+                sector=_NSE_SECTOR.get(r.get("tradingsymbol", ""), "Other"),
                 instrument_type="EQ",
                 tradingsymbol=r.get("tradingsymbol", ""),
             )
             h.day_change     = day_change
             h.day_change_pct = day_change_pct
             # pnl is computed by Holding.__post_init__ as qty × (ltp − avg_price).
-            # The quote feed will inject live LTP via _inject_ltp_holdings() which
-            # calls h.update_ltp(live_ltp) → pnl = qty × (live_ltp − avg_price).
+            # _inject_ltp_holdings() will overwrite ltp with the fresh ohlc snapshot
+            # on every render: h.update_ltp(live_ltp) → pnl = qty × (live_ltp − avg_price).
             # Do NOT override with the API pnl field — it uses EOD close prices.
 
             logger.debug(

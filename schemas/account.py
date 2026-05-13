@@ -21,9 +21,9 @@ class AccountInfo:
 class MarginInfo:
     account_id: str
     broker: str
-    # Cash-only balance (no collateral, no intraday credits)
+    # live_balance: opening_balance + intraday_payin − payout (full usable cash)
     available_cash: float = 0.0
-    # Total available for trading = cash + collateral - utilised
+    # Total available for trading = live_balance + collateral − debits
     net_available: float = 0.0
     # Margin currently blocked (SPAN + exposure + option premium + etc.)
     used_margin: float = 0.0
@@ -53,8 +53,8 @@ class AccountSummary:
     positions_pnl: float = 0.0         # Unrealized P&L on open positions
     realised_pnl: float = 0.0          # Realized P&L from closed positions today
     # Margin and cash
-    available_cash: float = 0.0        # Pure cash balance
-    net_available: float = 0.0         # Total available margin (cash + collateral - used)
+    available_cash: float = 0.0        # live_balance: opening + intraday_payin − payout
+    net_available: float = 0.0         # live_balance + collateral − debits
     used_margin: float = 0.0           # Margin currently blocked
     total_collateral: float = 0.0      # Collateral from pledged holdings
     # Day metrics

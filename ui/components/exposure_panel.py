@@ -20,10 +20,10 @@ def render_margin_usage(account_data: List[dict]):
     )
 
     for d in account_data:
-        used = d.get("used_margin", 0)
-        cash = d.get("available_cash", 0)
-        total = used + cash
-        pct = (used / total * 100) if total > 0 else 0.0
+        used      = d.get("used_margin", 0)
+        net_avail = d.get("net_available", d.get("available_cash", 0))
+        total     = used + net_avail          # net_available already includes collateral
+        pct       = (used / total * 100) if total > 0 else 0.0
         bar_color = "#f85149" if pct > 75 else ("#f0883e" if pct > 50 else "#3fb950")
 
         st.markdown(
@@ -32,7 +32,7 @@ def render_margin_usage(account_data: List[dict]):
                 <div style="display:flex; justify-content:space-between;
                             font-size:0.8rem; color:#8b949e; margin-bottom:4px;">
                     <span><strong style="color:#c9d1d9;">{d['display_name']}</strong></span>
-                    <span>Used: {format_inr(used)} / Total: {format_inr(total)} ({pct:.1f}%)</span>
+                    <span>Used: {format_inr(used)} / Available: {format_inr(net_avail)} ({pct:.1f}%)</span>
                 </div>
                 <div style="background:#21262d; border-radius:4px; height:8px; overflow:hidden;">
                     <div style="background:{bar_color}; width:{pct:.1f}%; height:100%;

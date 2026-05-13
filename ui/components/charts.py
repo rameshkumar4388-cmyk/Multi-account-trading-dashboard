@@ -165,38 +165,78 @@ def render_pnl_waterfall(account_data: List[dict]):
 
 
 def render_holdings_treemap(holdings_data: List[dict]):
-    """Treemap: holdings by current value, coloured by P&L %."""
+    """Treemap: holdings by current value, coloured by P&L %.
+
+    Plotly treemap requires strictly positive values — zero/negative items are
+    dropped. Two-level hierarchy (sector → symbol) is used when meaningful
+    sector data is present; falls back to a flat layout when all items share
+    the same sector (e.g. all "Other"), avoiding a confusing single-bucket view.
+    """
     if not holdings_data:
         return
 
-    symbols = [d["symbol"] for d in holdings_data]
-    values = [d["current_value"] for d in holdings_data]
-    pnl_pcts = [d.get("pnl_pct", 0) for d in holdings_data]
-    sectors = [d.get("sector", "Unknown") for d in holdings_data]
+    valid = [d for d in holdings_data if (d.get("current_value") or 0) > 0]
+    if not valid:
+        st.info("No holdings with positive value to display in treemap.")
+        return
 
-    fig = go.Figure(go.Treemap(
-        labels=symbols,
-        parents=sectors,
-        values=values,
-        customdata=list(zip(pnl_pcts, values)),
-        marker=dict(
-            colors=pnl_pcts,
-            colorscale=[[0, "#f85149"], [0.5, "#21262d"], [1, "#3fb950"]],
-            cmid=0,
-            showscale=True,
-            colorbar=dict(
-                title=dict(text="P&L %", font=dict(color=_TEXT, size=10)),
-                tickfont=dict(color=_TEXT, size=10),
+    symbols  = [d["symbol"]             for d in valid]
+    values   = [d["current_value"]       for d in valid]
+    pnl_pcts = [d.get("pnl_pct", 0)     for d in valid]
+    sectors  = [d.get("sector", "Other") for d in valid]
+
+    unique_sectors = set(sectors)
+    use_hierarchy  = len(unique_sectors) > 1 or next(iter(unique_sectors)) not in ("Other", "Unknown", "")
+
+    _marker = dict(
+        colors=pnl_pcts,
+        colorscale=[[0, "#f85149"], [0.5, "#21262d"], [1, "#3fb950"]],
+        cmid=0, showscale=True,
+        colorbar=dict(
+            title=dict(text="P&L %", font=dict(color=_TEXT, size=10)),
+            tickfont=dict(color=_TEXT, size=10),
+        ),
+    )
+    _text_tmpl = "<b>%{label}</b><br>%{customdata[0]:+.2f}%"
+    _hover     = "<b>%{label}</b><br>Value: ₹%{customdata[1]:,.0f}<br>P&L: %{customdata[0]:+.2f}%<extra></extra>"
+
+    if use_hierarchy:
+        # Build explicit node list: sector root nodes + symbol leaf nodes.
+        # Use prefixed ids (sec:{name}, sym:{symbol}) to avoid collisions when a
+        # symbol name happens to match a sector name.
+        ids, labels, parents, vals, colors, custom = [], [], [], [], [], []
+        for sec in dict.fromkeys(sectors):           # preserve order, deduplicate
+            ids.append(f"sec:{sec}"); labels.append(sec)
+            parents.append(""); vals.append(0)
+            colors.append(0); custom.append((0, 0))
+        for sym, sec, val, pct in zip(symbols, sectors, values, pnl_pcts):
+            ids.append(f"sym:{sym}"); labels.append(sym)
+            parents.append(f"sec:{sec}"); vals.append(val)
+            colors.append(pct); custom.append((pct, val))
+
+        fig = go.Figure(go.Treemap(
+            ids=ids, labels=labels, parents=parents, values=vals,
+            customdata=custom,
+            branchvalues="total",
+            marker=dict(
+                colors=colors,
+                colorscale=[[0, "#f85149"], [0.5, "#21262d"], [1, "#3fb950"]],
+                cmid=0, showscale=True,
+                colorbar=dict(
+                    title=dict(text="P&L %", font=dict(color=_TEXT, size=10)),
+                    tickfont=dict(color=_TEXT, size=10),
+                ),
             ),
-        ),
-        texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2f}%",
-        textfont=dict(size=11),
-        hovertemplate=(
-            "<b>%{label}</b><br>"
-            "Value: ₹%{customdata[1]:,.0f}<br>"
-            "P&L: %{customdata[0]:+.2f}%"
-            "<extra></extra>"
-        ),
-    ))
-    fig.update_layout(**_base_layout("Holdings Treemap (size=value, color=P&L%)", height=400))
+            texttemplate=_text_tmpl, textfont=dict(size=11),
+            hovertemplate=_hover,
+        ))
+    else:
+        fig = go.Figure(go.Treemap(
+            labels=symbols, parents=[""] * len(symbols),
+            values=values, customdata=list(zip(pnl_pcts, values)),
+            marker=_marker, texttemplate=_text_tmpl,
+            textfont=dict(size=11), hovertemplate=_hover,
+        ))
+
+    fig.update_layout(**_base_layout("Holdings Treemap (size=value, color=P&L%)", height=420))
     st.plotly_chart(fig, use_container_width=True)
