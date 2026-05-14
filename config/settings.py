@@ -220,23 +220,121 @@ def _load_kite_single_account_from_env() -> List[AccountConfig]:
     return []
 
 
+def _load_fivepaisa_accounts_from_env() -> List[AccountConfig]:
+    """
+    Dynamically discover all 5paisa accounts from environment variables.
+
+    Discovery rule: any env var matching FIVEPAISA_<TAG>_CLIENT_CODE registers
+    a new account.  TAG can be any identifier (e.g. MAIN, SPOUSE, DA1898).
+
+    Required per account:
+        FIVEPAISA_<TAG>_APP_NAME         — API app name
+        FIVEPAISA_<TAG>_APP_SOURCE       — API app source (numeric, e.g. 27773)
+        FIVEPAISA_<TAG>_USER_ID          — API user ID
+        FIVEPAISA_<TAG>_USER_KEY         — API user key
+        FIVEPAISA_<TAG>_ENCRYPTION_KEY   — API encryption key
+        FIVEPAISA_<TAG>_ACCESS_TOKEN     — daily access token
+        FIVEPAISA_<TAG>_CLIENT_CODE      — 5paisa client code (e.g. "12345678")
+
+    Optional per account:
+        FIVEPAISA_<TAG>_PASSWORD         — defaults to "dummy" (not needed for token auth)
+        FIVEPAISA_<TAG>_DISPLAY_NAME     — shown in UI; defaults to "5paisa (<TAG>)"
+    """
+    tags: set[str] = set()
+    for key in os.environ:
+        if key.startswith("FIVEPAISA_") and key.endswith("_CLIENT_CODE"):
+            tag = key[len("FIVEPAISA_"):-len("_CLIENT_CODE")]
+            if tag:
+                tags.add(tag)
+
+    if not tags:
+        return []
+
+    accounts: List[AccountConfig] = []
+    for tag in sorted(tags):
+        prefix = f"FIVEPAISA_{tag}"
+
+        app_name       = os.getenv(f"{prefix}_APP_NAME", "").strip()
+        app_source     = os.getenv(f"{prefix}_APP_SOURCE", "").strip()
+        user_id        = os.getenv(f"{prefix}_USER_ID", "").strip()
+        user_key       = os.getenv(f"{prefix}_USER_KEY", "").strip()
+        encryption_key = os.getenv(f"{prefix}_ENCRYPTION_KEY", "").strip()
+        password       = os.getenv(f"{prefix}_PASSWORD", "dummy").strip() or "dummy"
+        access_token   = os.getenv(f"{prefix}_ACCESS_TOKEN", "").strip()
+        client_code    = os.getenv(f"{prefix}_CLIENT_CODE", "").strip()
+        display_name   = os.getenv(f"{prefix}_DISPLAY_NAME", f"5paisa ({tag})").strip()
+
+        missing: List[str] = []
+        for field_name, value in [
+            (f"FIVEPAISA_{tag}_APP_NAME",       app_name),
+            (f"FIVEPAISA_{tag}_APP_SOURCE",      app_source),
+            (f"FIVEPAISA_{tag}_USER_ID",         user_id),
+            (f"FIVEPAISA_{tag}_USER_KEY",        user_key),
+            (f"FIVEPAISA_{tag}_ENCRYPTION_KEY",  encryption_key),
+            (f"FIVEPAISA_{tag}_ACCESS_TOKEN",    access_token),
+            (f"FIVEPAISA_{tag}_CLIENT_CODE",     client_code),
+        ]:
+            if _is_placeholder(value):
+                missing.append(field_name)
+
+        if missing:
+            logger.warning(
+                "Skipping 5paisa account FIVEPAISA_%s — missing: %s",
+                tag, ", ".join(missing),
+            )
+            continue
+
+        account_id = f"fivepaisa_{tag.lower()}"
+        accounts.append(AccountConfig(
+            account_id=account_id,
+            broker="fivepaisa",
+            display_name=display_name,
+            owner=client_code,
+            enabled=True,
+            credentials={
+                "app_name":       app_name,
+                "app_source":     app_source,
+                "user_id":        user_id,
+                "user_key":       user_key,
+                "encryption_key": encryption_key,
+                "password":       password,
+                "access_token":   access_token,
+                "client_code":    client_code,
+                "display_name":   display_name,
+            },
+            metadata={
+                "tag":            tag,
+                "original_broker":"fivepaisa",
+                "account_type":   "live",
+            },
+        ))
+        logger.info("Registered 5paisa account: %s (%s)", account_id, display_name)
+
+    return accounts
+
+
 def load_settings() -> AppSettings:
     mode    = os.getenv("APP_MODE", "mock").lower().strip()
     db_path = os.getenv("DB_PATH", "data/dashboard.db").strip()
 
     if mode == "live":
-        # Merge both discovery methods so ZERODHA_<TAG>_* accounts and the flat
-        # KITE_*/ZERODHA_* single-account pattern coexist without either silencing
-        # the other.  Deduplication by account_id prevents the same account
-        # appearing twice if someone defines it both ways.
-        tagged_accounts = _load_accounts_from_env()
-        flat_accounts   = _load_kite_single_account_from_env()
-        tagged_ids      = {a.account_id for a in tagged_accounts}
-        accounts        = tagged_accounts + [a for a in flat_accounts
-                                             if a.account_id not in tagged_ids]
+        # Merge all broker discovery sources.  Deduplication by account_id
+        # prevents the same account appearing twice across patterns.
+        tagged_accounts    = _load_accounts_from_env()
+        flat_accounts      = _load_kite_single_account_from_env()
+        fivepaisa_accounts = _load_fivepaisa_accounts_from_env()
+
+        seen_ids: set[str] = set()
+        accounts: List[AccountConfig] = []
+        for a in tagged_accounts + flat_accounts + fivepaisa_accounts:
+            if a.account_id not in seen_ids:
+                seen_ids.add(a.account_id)
+                accounts.append(a)
+
         if not accounts:
             logger.warning(
-                "APP_MODE=live but no valid Zerodha accounts found in .env — "
+                "APP_MODE=live but no valid broker accounts found in .env "
+                "(checked ZERODHA_*, KITE_*, FIVEPAISA_*) — "
                 "falling back to mock/demo mode."
             )
             mode = "mock"
