@@ -264,6 +264,78 @@ class FivePaisaAdapter(BrokerAdapter):
     # Holdings
     # ------------------------------------------------------------------
 
+    def _fetch_market_snapshot(self, scrip_info: dict) -> dict:
+        """
+        Batch-fetch previous close + day change from 5paisa MarketSnapshot.
+
+        scrip_info: {symbol → (exch_char, scrip_code_int)}
+                    e.g. {"INTLCONV": ("N", 523648)}
+        Returns:    {symbol → {"close": float, "change": float, "change_pct": float}}
+
+        Uses 5paisa's own reference prices so InvIT/REIT unit distributions
+        are handled consistently with the broker's own day P&L computation.
+        """
+        if not scrip_info or not self._client:
+            return {}
+        try:
+            req_list = [
+                {"Exchange": exch, "ExchangeType": "C", "ScripCode": sc}
+                for _sym, (exch, sc) in scrip_info.items()
+            ]
+            raw = self._client.fetch_market_snapshot(req_list)
+            if not raw:
+                return {}
+
+            # fetch_market_snapshot returns res["body"] — a dict with "Data" key
+            items = raw.get("Data", []) if isinstance(raw, dict) else (
+                raw if isinstance(raw, list) else []
+            )
+
+            code_to_sym = {sc: sym for sym, (_exch, sc) in scrip_info.items()}
+
+            result = {}
+            for item in (items or []):
+                if not isinstance(item, dict):
+                    continue
+                sc  = item.get("ScripCode") or item.get("Token")
+                sym = code_to_sym.get(sc)
+                if not sym:
+                    continue
+
+                close   = _safe_float(
+                    item.get("PreviousClose") or item.get("CloseRate")
+                    or item.get("Close") or 0
+                )
+                change  = _safe_float(
+                    item.get("Change") or item.get("DayChange") or 0
+                )
+                chg_pct = _safe_float(
+                    item.get("ChangePer") or item.get("ChangePercent")
+                    or item.get("ChangePercentage") or 0
+                )
+
+                # Derive change from close + LTP when the change field is absent
+                if change == 0 and close > 0:
+                    ltp_snap = _safe_float(
+                        item.get("LastRate") or item.get("LTP")
+                        or item.get("Rate") or 0
+                    )
+                    if ltp_snap > 0:
+                        change  = round(ltp_snap - close, 4)
+                        chg_pct = round(change / close * 100, 4) if close else 0.0
+
+                result[sym] = {"close": close, "change": change, "change_pct": chg_pct}
+
+            logger.info(
+                "5paisa _fetch_market_snapshot: %d / %d symbols resolved",
+                len(result), len(scrip_info),
+            )
+            return result
+
+        except Exception as exc:
+            logger.warning("5paisa _fetch_market_snapshot failed: %s", exc)
+            return {}
+
     def get_holdings(self, account_id: str) -> List[Holding]:
         if not self.is_session_valid(account_id):
             return []
@@ -276,16 +348,48 @@ class FivePaisaAdapter(BrokerAdapter):
         if not raw:
             return []
 
+        # Surface all fields so unexpected keys are visible in logs
+        first = raw[0] if isinstance(raw[0], dict) else {}
+        logger.info("5paisa holdings payload keys (first row): %s", list(first.keys()))
+
+        # Check whether the holdings row already carries day-change data
+        has_close    = any(k in first for k in ("PreviousClose", "ClosePrice", "Close"))
+        has_day_gain = "DayGain" in first
+
+        # If no broker-provided close/gain fields, collect ScripCodes for
+        # a market-snapshot fallback call (uses 5paisa's own reference prices)
+        scrip_info: dict = {}
+        if not has_close and not has_day_gain:
+            for r in raw:
+                sym  = (r.get("Symbol") or "").strip()
+                sc   = r.get("ScripCode") or r.get("Scrip_Code")
+                exch = (r.get("Exch") or "N").strip()
+                if sym and sc:
+                    try:
+                        scrip_info[sym] = (exch, int(sc))
+                    except (ValueError, TypeError):
+                        pass
+            if scrip_info:
+                logger.info(
+                    "5paisa holdings: no DayGain/PreviousClose fields — "
+                    "falling back to MarketSnapshot for %d symbols", len(scrip_info)
+                )
+            else:
+                logger.warning(
+                    "5paisa holdings: no DayGain/PreviousClose fields and "
+                    "no ScripCodes — day_change will be 0 for all holdings"
+                )
+
+        snapshot: dict = self._fetch_market_snapshot(scrip_info) if scrip_info else {}
+
         holdings: List[Holding] = []
         for r in raw:
-            # Confirmed field names from live py5paisa response:
-            #   Symbol, Quantity, AvgRate, CurrentPrice, Exch
             symbol = (r.get("Symbol") or "").strip()
             if not symbol:
-                logger.warning("5paisa holding skipped — 'Symbol' missing in row: %s", r)
+                logger.warning("5paisa holding skipped — 'Symbol' missing: %s", r)
                 continue
 
-            qty = _safe_float(r.get("Quantity"))
+            qty = _safe_float(r.get("Quantity") or r.get("Qty"))
             if qty <= 0:
                 logger.debug("5paisa holding skipped — zero Quantity for %s", symbol)
                 continue
@@ -295,8 +399,42 @@ class FivePaisaAdapter(BrokerAdapter):
             exchange_raw = (r.get("Exch") or "N").strip()
             exchange     = "NSE" if exchange_raw == "N" else "BSE"
 
-            # ISIN not present in actual API response — leave blank
-            # day_change left at 0; overwritten by md_svc ohlc injection each render
+            # ── Per-share day change: three sources in priority order ──────
+            # All use 5paisa's own reference prices — critical for InvITs/REITs
+            # where Zerodha's ohlc close diverges on ex-distribution days.
+            day_change_per_share = 0.0
+            day_change_pct       = 0.0
+
+            day_gain   = r.get("DayGain")       # total position gain (all shares)
+            prev_close = _safe_float(
+                r.get("PreviousClose") or r.get("ClosePrice") or r.get("Close") or 0
+            )
+            raw_pct = (
+                r.get("DayGainPercentage") or r.get("DayGainPct") or r.get("ChangePercent")
+            )
+
+            if day_gain is not None and qty > 0:
+                # Priority 1: DayGain (total) ÷ qty → per-share
+                day_change_per_share = round(_safe_float(day_gain) / qty, 4)
+                day_change_pct = (
+                    _safe_float(raw_pct) if raw_pct is not None
+                    else (round(day_change_per_share / prev_close * 100, 4) if prev_close > 0 else 0.0)
+                )
+            elif prev_close > 0 and ltp > 0:
+                # Priority 2: PreviousClose / ClosePrice in holdings row
+                day_change_per_share = round(ltp - prev_close, 4)
+                day_change_pct       = round(day_change_per_share / prev_close * 100, 4)
+            elif symbol in snapshot:
+                # Priority 3: MarketSnapshot (requires ScripCode)
+                snap = snapshot[symbol]
+                day_change_per_share = snap["change"]
+                day_change_pct       = snap["change_pct"]
+            else:
+                logger.debug(
+                    "5paisa holding %s: no previous-close source — day_change=0",
+                    symbol,
+                )
+
             sector = _NSE_SECTOR.get(symbol, "Other")
 
             h = Holding(
@@ -312,6 +450,8 @@ class FivePaisaAdapter(BrokerAdapter):
                 instrument_type="EQ",
                 tradingsymbol=symbol,
             )
+            h.day_change     = day_change_per_share
+            h.day_change_pct = day_change_pct
             holdings.append(h)
 
         logger.info("5paisa get_holdings '%s': %d holdings", account_id, len(holdings))
