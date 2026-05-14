@@ -193,9 +193,12 @@ class PortfolioService:
                 # actions (e.g. InvIT/REIT unit distributions show as artificial
                 # losses). Leaving day_change at 0 is honest; injecting a wrong
                 # value produces a wildly incorrect day P&L.
-                if fresh_change and h.broker != "fivepaisa":
+                # Zerodha: broker-native day_change from holdings API is canonical.
+                # 5paisa:  adapter provides it via MarketSnapshot; ohlc would diverge.
+                # Others:  inject from ohlc (no broker-provided day_change).
+                if fresh_change and h.broker not in ("zerodha", "fivepaisa"):
                     h.day_change = fresh_change          # ← per-share only, no × quantity
-                if fresh_change_pct and h.broker != "fivepaisa":
+                if fresh_change_pct and h.broker not in ("zerodha", "fivepaisa"):
                     h.day_change_pct = fresh_change_pct
         return holdings
 
@@ -204,12 +207,15 @@ class PortfolioService:
             ltp = self._md.get_ltp(p.symbol)
             if ltp and ltp > 0:
                 p.update_ltp(ltp)
-                # Recompute day_pnl from fresh ohlc close so it never lags the
-                # broker TTL cache.  NRML/CNC: baseline = previous-day settle.
-                # MIS (intraday): baseline = avg_price (no overnight component).
-                close = self._md.get_close(p.symbol)
+                # day_pnl for NRML/CNC: Zerodha's broker-native m2m is canonical.
+                # SP7086 ohlc.close differs from Zerodha's internal settlement
+                # reference, causing persistent drift vs the Kite app.
+                # MIS formula is (ltp − avg_price) × qty — identical regardless
+                # of source, so fresh ltp is used for both brokers.
                 if p.product == "MIS":
                     p.day_pnl = round((ltp - p.avg_price) * p.quantity, 2)
-                elif close and close > 0:
-                    p.day_pnl = round((ltp - close) * p.quantity, 2)
+                elif p.broker != "zerodha":
+                    close = self._md.get_close(p.symbol)
+                    if close and close > 0:
+                        p.day_pnl = round((ltp - close) * p.quantity, 2)
         return positions
