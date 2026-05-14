@@ -291,38 +291,34 @@ class FivePaisaAdapter(BrokerAdapter):
                 raw if isinstance(raw, list) else []
             )
 
-            code_to_sym = {sc: sym for sym, (_exch, sc) in scrip_info.items()}
+            # String-normalise keys so lookups work whether ScripCode comes
+            # back as int (5606) or str ("5606") from the API.
+            code_to_sym = {str(sc): sym for sym, (_exch, sc) in scrip_info.items()}
 
             result = {}
             for item in (items or []):
                 if not isinstance(item, dict):
                     continue
-                sc  = item.get("ScripCode") or item.get("Token")
+                # Normalise ScripCode to str for dict lookup
+                sc  = str(item.get("ScripCode") or item.get("Token") or "")
                 sym = code_to_sym.get(sc)
                 if not sym:
                     continue
 
-                close   = _safe_float(
-                    item.get("PreviousClose") or item.get("CloseRate")
-                    or item.get("Close") or 0
-                )
-                change  = _safe_float(
-                    item.get("Change") or item.get("DayChange") or 0
-                )
-                chg_pct = _safe_float(
-                    item.get("ChangePer") or item.get("ChangePercent")
-                    or item.get("ChangePercentage") or 0
-                )
+                # Verified field names from live 5paisa MarketSnapshot response:
+                #   PClose          — previous session close
+                #   NetChange       — day change (LTP − PClose)
+                #   LastTradedPrice — current LTP
+                close  = _safe_float(item.get("PClose") or 0)
+                change = _safe_float(item.get("NetChange") or 0)
 
-                # Derive change from close + LTP when the change field is absent
+                # Derive change from LTP − PClose when NetChange is absent/zero
                 if change == 0 and close > 0:
-                    ltp_snap = _safe_float(
-                        item.get("LastRate") or item.get("LTP")
-                        or item.get("Rate") or 0
-                    )
+                    ltp_snap = _safe_float(item.get("LastTradedPrice") or 0)
                     if ltp_snap > 0:
-                        change  = round(ltp_snap - close, 4)
-                        chg_pct = round(change / close * 100, 4) if close else 0.0
+                        change = round(ltp_snap - close, 4)
+
+                chg_pct = round(change / close * 100, 4) if close else 0.0
 
                 result[sym] = {"close": close, "change": change, "change_pct": chg_pct}
 
