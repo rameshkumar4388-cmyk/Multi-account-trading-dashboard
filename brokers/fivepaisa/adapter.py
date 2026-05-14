@@ -449,16 +449,24 @@ class FivePaisaAdapter(BrokerAdapter):
         available     = _safe_float(m.get("Ledgerbalance"))
         net_available = _safe_float(m.get("NetAvailableMargin"))
         blocked       = _safe_float(m.get("MarginUtilized"))
-        # GrossHoldingValue = total DP holdings; DPFreeStockValue = free portion
-        collateral        = _safe_float(m.get("GrossHoldingValue"))
-        deriv_margin      = _safe_float(m.get("DerivativeMargin"))
-        option_premium    = _safe_float(m.get("OptionsPremium"))
+        # Pledged collateral = total DP value minus the free (unpledged) portion.
+        # GrossHoldingValue = market value of ALL DP holdings (free + pledged).
+        # DPFreeStockValue  = market value of unpledged holdings only.
+        # Difference = value of pledged (collateralized) holdings.
+        # When nothing is pledged both values are equal → collateral = 0.
+        gross_holding  = _safe_float(m.get("GrossHoldingValue"))
+        dp_free        = _safe_float(m.get("DPFreeStockValue"))
+        collateral     = max(round(gross_holding - dp_free, 2), 0.0)
+        deriv_margin   = _safe_float(m.get("DerivativeMargin"))
+        option_premium = _safe_float(m.get("OptionsPremium"))
 
         logger.info(
             "5paisa get_margin '%s': ledger=%.2f net_avail=%.2f "
-            "margin_used=%.2f gross_holdings=%.2f deriv=%.2f opt_prem=%.2f",
+            "margin_used=%.2f gross=%.2f dp_free=%.2f collateral=%.2f "
+            "deriv=%.2f opt_prem=%.2f",
             account_id, available, net_available,
-            blocked, collateral, deriv_margin, option_premium,
+            blocked, gross_holding, dp_free, collateral,
+            deriv_margin, option_premium,
         )
 
         return MarginInfo(

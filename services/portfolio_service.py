@@ -186,9 +186,16 @@ class PortfolioService:
                 # It will be multiplied by quantity in the summary aggregation.
                 fresh_change     = self._md.get_change(h.symbol)
                 fresh_change_pct = self._md.get_change_pct(h.symbol)
-                if fresh_change:
+                # Only inject ohlc-based day_change for brokers that don't
+                # provide it natively in their holdings API.  5paisa holdings
+                # carry no broker-computed day_change; the ohlc close from
+                # SP7086 can diverge badly for instruments with recent corporate
+                # actions (e.g. InvIT/REIT unit distributions show as artificial
+                # losses). Leaving day_change at 0 is honest; injecting a wrong
+                # value produces a wildly incorrect day P&L.
+                if fresh_change and h.broker != "fivepaisa":
                     h.day_change = fresh_change          # ← per-share only, no × quantity
-                if fresh_change_pct:
+                if fresh_change_pct and h.broker != "fivepaisa":
                     h.day_change_pct = fresh_change_pct
         return holdings
 
