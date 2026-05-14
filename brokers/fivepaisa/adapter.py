@@ -278,33 +278,25 @@ class FivePaisaAdapter(BrokerAdapter):
 
         holdings: List[Holding] = []
         for r in raw:
-            # Prefer NSECode as the canonical symbol; fall back to BSECode
-            nse_code = (r.get("NSECode") or "").strip()
-            bse_code  = str(r.get("BSECode") or "").strip()
-            symbol    = nse_code or bse_code
+            # Confirmed field names from live py5paisa response:
+            #   Symbol, Quantity, AvgRate, CurrentPrice, Exch
+            symbol = (r.get("Symbol") or "").strip()
             if not symbol:
-                logger.debug("5paisa holding skipped — no symbol: %s", r)
+                logger.warning("5paisa holding skipped — 'Symbol' missing in row: %s", r)
                 continue
 
-            qty = _safe_float(r.get("Qty"))
+            qty = _safe_float(r.get("Quantity"))
             if qty <= 0:
+                logger.debug("5paisa holding skipped — zero Quantity for %s", symbol)
                 continue
 
-            avg_price     = _safe_float(r.get("Price"))
-            ltp           = _safe_float(r.get("CurrentPrice"))
-            cost_value    = _safe_float(r.get("CostValue"))
-            current_value = _safe_float(r.get("CurrentValue"))
-            isin          = (r.get("ISIN") or "").strip()
-            exchange_raw  = (r.get("Exchange") or "N").strip()
-            exchange      = "NSE" if exchange_raw == "N" else "BSE"
+            avg_price    = _safe_float(r.get("AvgRate"))
+            ltp          = _safe_float(r.get("CurrentPrice"))
+            exchange_raw = (r.get("Exch") or "N").strip()
+            exchange     = "NSE" if exchange_raw == "N" else "BSE"
 
-            # Recompute avg_price from CostValue if Price is 0 (API quirk)
-            if avg_price == 0 and cost_value > 0 and qty > 0:
-                avg_price = round(cost_value / qty, 4)
-
-            # Day change: derive from current vs previous close if API provides it
-            # 5paisa holdings API doesn't directly expose day_change per share,
-            # so we leave it at 0 — it gets overwritten by md_svc ohlc injection.
+            # ISIN not present in actual API response — leave blank
+            # day_change left at 0; overwritten by md_svc ohlc injection each render
             sector = _NSE_SECTOR.get(symbol, "Other")
 
             h = Holding(
@@ -312,7 +304,7 @@ class FivePaisaAdapter(BrokerAdapter):
                 broker="fivepaisa",
                 symbol=symbol,
                 exchange=exchange,
-                isin=isin,
+                isin="",
                 quantity=qty,
                 avg_price=avg_price,
                 ltp=ltp,
@@ -340,6 +332,13 @@ class FivePaisaAdapter(BrokerAdapter):
 
         if not raw:
             return []
+
+        # Log the first row's keys so field names can be verified against live data
+        if raw and isinstance(raw[0], dict):
+            logger.info(
+                "5paisa positions payload keys (first row): %s",
+                list(raw[0].keys()),
+            )
 
         positions: List[Position] = []
         for r in raw:
@@ -434,19 +433,32 @@ class FivePaisaAdapter(BrokerAdapter):
             logger.warning("5paisa get_margin '%s': empty EquityMargin response", account_id)
             return MarginInfo(account_id=account_id, broker="fivepaisa")
 
-        # EquityMargin is a list; take the first (and usually only) element
+        # margin() returns a list; take the first (and usually only) element.
+        # Confirmed field names from live py5paisa response:
+        #   Ledgerbalance, NetAvailableMargin, MarginUtilized,
+        #   GrossHoldingValue, DPFreeStockValue, DerivativeMargin, OptionsPremium
         m = raw[0] if isinstance(raw, list) else raw
 
-        available  = _safe_float(m.get("AvailableBalance"))
-        blocked    = _safe_float(m.get("BlockedAmount"))
-        collateral = _safe_float(m.get("Collateral"))
+        if not isinstance(m, dict):
+            logger.error(
+                "5paisa get_margin '%s': unexpected payload type %s — raw=%s",
+                account_id, type(m).__name__, raw,
+            )
+            return MarginInfo(account_id=account_id, broker="fivepaisa")
 
-        net_available = max(round(available + collateral - blocked, 2), 0.0)
+        available     = _safe_float(m.get("Ledgerbalance"))
+        net_available = _safe_float(m.get("NetAvailableMargin"))
+        blocked       = _safe_float(m.get("MarginUtilized"))
+        # GrossHoldingValue = total DP holdings; DPFreeStockValue = free portion
+        collateral        = _safe_float(m.get("GrossHoldingValue"))
+        deriv_margin      = _safe_float(m.get("DerivativeMargin"))
+        option_premium    = _safe_float(m.get("OptionsPremium"))
 
         logger.info(
-            "5paisa get_margin '%s': available=%.2f blocked=%.2f "
-            "collateral=%.2f net_available=%.2f",
-            account_id, available, blocked, collateral, net_available,
+            "5paisa get_margin '%s': ledger=%.2f net_avail=%.2f "
+            "margin_used=%.2f gross_holdings=%.2f deriv=%.2f opt_prem=%.2f",
+            account_id, available, net_available,
+            blocked, collateral, deriv_margin, option_premium,
         )
 
         return MarginInfo(
@@ -456,6 +468,8 @@ class FivePaisaAdapter(BrokerAdapter):
             net_available=net_available,
             used_margin=blocked,
             total_collateral=collateral,
+            span_margin=deriv_margin,
+            option_premium=option_premium,
         )
 
     # ------------------------------------------------------------------
