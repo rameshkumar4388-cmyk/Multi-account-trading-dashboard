@@ -352,33 +352,25 @@ class FivePaisaAdapter(BrokerAdapter):
         first = raw[0] if isinstance(raw[0], dict) else {}
         logger.info("5paisa holdings payload keys (first row): %s", list(first.keys()))
 
-        # Check whether the holdings row already carries day-change data
-        has_close    = any(k in first for k in ("PreviousClose", "ClosePrice", "Close"))
-        has_day_gain = "DayGain" in first
-
-        # If no broker-provided close/gain fields, collect ScripCodes for
-        # a market-snapshot fallback call (uses 5paisa's own reference prices)
+        # Build snapshot identifiers from NseCode / BseCode (exchange-appropriate).
+        # These are present in the holdings payload and accepted by fetch_market_snapshot
+        # as ScripCode. Always build regardless of other available fields — snapshot
+        # uses 5paisa's own reference prices (correct for InvITs/REITs with distributions).
         scrip_info: dict = {}
-        if not has_close and not has_day_gain:
-            for r in raw:
-                sym  = (r.get("Symbol") or "").strip()
-                sc   = r.get("ScripCode") or r.get("Scrip_Code")
-                exch = (r.get("Exch") or "N").strip()
-                if sym and sc:
-                    try:
-                        scrip_info[sym] = (exch, int(sc))
-                    except (ValueError, TypeError):
-                        pass
-            if scrip_info:
-                logger.info(
-                    "5paisa holdings: no DayGain/PreviousClose fields — "
-                    "falling back to MarketSnapshot for %d symbols", len(scrip_info)
-                )
-            else:
-                logger.warning(
-                    "5paisa holdings: no DayGain/PreviousClose fields and "
-                    "no ScripCodes — day_change will be 0 for all holdings"
-                )
+        for r in raw:
+            sym  = (r.get("Symbol") or "").strip()
+            exch = (r.get("Exch") or "N").strip()
+            sc   = str(r.get("NseCode") if exch == "N" else r.get("BseCode") or "").strip()
+            if sym and sc:
+                scrip_info[sym] = (exch, sc)
+
+        if scrip_info:
+            logger.info("5paisa holdings: snapshot request for %d symbols", len(scrip_info))
+        else:
+            logger.warning(
+                "5paisa holdings: NseCode/BseCode absent from payload — "
+                "day_change will be 0 for all holdings"
+            )
 
         snapshot: dict = self._fetch_market_snapshot(scrip_info) if scrip_info else {}
 
