@@ -348,6 +348,19 @@ class FivePaisaAdapter(BrokerAdapter):
         first = raw[0] if isinstance(raw[0], dict) else {}
         logger.info("5paisa holdings payload keys (first row): %s", list(first.keys()))
 
+        # ── DIAGNOSTIC: dump every field of every raw holding row ─────────────
+        # Goal: discover broker-native day P&L fields (DayGain, PreviousClose,
+        # DayChange, etc.) that may be present but previously unparsed.
+        # Remove after investigation is complete.
+        logger.warning("5PAISA RAW HOLDINGS DIAG [%s] %d rows", account_id, len(raw))
+        for _i, _r in enumerate(raw):
+            _sym = (_r.get("Symbol") or _r.get("Scrip") or f"row{_i}").strip()
+            # Log every key=value pair for this holding
+            _fields = " | ".join(f"{k}={v!r}" for k, v in _r.items())
+            logger.warning("5PAISA RAW HOLDINGS DIAG [%s] %s :: %s",
+                           account_id, _sym, _fields)
+        # ── END DIAGNOSTIC ───────────────────────────────────────────────────
+
         # Build snapshot identifiers from NseCode / BseCode (exchange-appropriate).
         # These are present in the holdings payload and accepted by fetch_market_snapshot
         # as ScripCode. Always build regardless of other available fields — snapshot
