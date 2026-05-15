@@ -71,11 +71,16 @@ def render_account_pnl_cards(summaries: List[AccountSummary], account_configs: d
         # Net worth = holdings value + cash + positions MTM P&L
         card_net_worth = s.net_worth  # adapter now computes this correctly
 
-        # Margin bar: used / (cash + collateral)
-        gross_available = s.available_cash + s.total_collateral
-        margin_pct      = (s.used_margin / gross_available * 100) if gross_available > 0 else 0.0
+        # Margin calculations
+        # Denominator: total margin capacity = cash + collateral (explicit formula)
+        total_margin    = s.available_cash + s.total_collateral
+        margin_pct      = (s.used_margin / total_margin * 100) if total_margin > 0 else 0.0
         margin_pct      = min(margin_pct, 100)
         bar_color       = C["negative"] if margin_pct > 75 else (C["warning"] if margin_pct > 50 else C["positive"])
+        # available_margin = (cash + collateral) - used_margin
+        available_margin = total_margin - s.used_margin
+        avail_color      = C["positive"] if available_margin >= 0 else C["negative"]
+        avail_sign       = "+" if available_margin > 0 else ""
 
         # Build inner content
         inner = (
@@ -89,7 +94,14 @@ def render_account_pnl_cards(summaries: List[AccountSummary], account_configs: d
             + _neutral_row("Cash", format_inr(s.available_cash))
             # ── Collateral ──
             + _neutral_row("Collateral Margin", format_inr(s.total_collateral))
-            # ── Used Margin + bar ──
+            # ── Available Margin (cash + collateral - used) ──
+            + f"<div style='padding:5px 0;margin-bottom:4px;'>"
+            + f"<div style='font-size:0.58rem;color:#454a6e;text-transform:uppercase;"
+            + f"letter-spacing:0.08em;font-weight:600;margin-bottom:2px;'>Available Margin</div>"
+            + f"<div style='font-size:0.82rem;font-weight:700;color:{avail_color};"
+            + f"font-family:\"JetBrains Mono\",monospace;line-height:1.2;'>"
+            + f"{avail_sign}{format_inr(available_margin)}</div></div>"
+            # ── Used Margin + bar — % basis: used / (cash + collateral) ──
             + f"<div style='padding:5px 0;margin-bottom:4px;'>"
             + f"<div style='display:flex;justify-content:space-between;"
             + f"font-size:0.58rem;color:#454a6e;text-transform:uppercase;"
