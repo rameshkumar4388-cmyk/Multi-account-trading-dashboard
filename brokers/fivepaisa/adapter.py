@@ -308,19 +308,23 @@ class FivePaisaAdapter(BrokerAdapter):
                 # Verified field names from live 5paisa MarketSnapshot response:
                 #   PClose          — previous session close
                 #   NetChange       — day change (LTP − PClose)
-                #   LastTradedPrice — current LTP
-                close  = _safe_float(item.get("PClose") or 0)
-                change = _safe_float(item.get("NetChange") or 0)
+                #   LastTradedPrice — current LTP at snapshot call time
+                close    = _safe_float(item.get("PClose") or 0)
+                change   = _safe_float(item.get("NetChange") or 0)
+                ltp_snap = _safe_float(item.get("LastTradedPrice") or 0)
 
                 # Derive change from LTP − PClose when NetChange is absent/zero
-                if change == 0 and close > 0:
-                    ltp_snap = _safe_float(item.get("LastTradedPrice") or 0)
-                    if ltp_snap > 0:
-                        change = round(ltp_snap - close, 4)
+                if change == 0 and close > 0 and ltp_snap > 0:
+                    change = round(ltp_snap - close, 4)
 
                 chg_pct = round(change / close * 100, 4) if close else 0.0
 
-                result[sym] = {"close": close, "change": change, "change_pct": chg_pct}
+                result[sym] = {
+                    "close":      close,
+                    "change":     change,
+                    "change_pct": chg_pct,
+                    "ltp":        ltp_snap,   # snapshot LTP — for sync-gap diagnosis
+                }
 
             logger.info(
                 "5paisa _fetch_market_snapshot: %d / %d symbols resolved",
@@ -463,17 +467,24 @@ class FivePaisaAdapter(BrokerAdapter):
                     symbol,
                 )
 
-            # ── DIAGNOSTIC: per-holding day P&L breakdown (remove after diagnosis) ──
-            _snap_pclose    = snapshot.get(symbol, {}).get("close",  None)
-            _snap_netchange = snapshot.get(symbol, {}).get("change", None)
+            # ── DIAGNOSTIC: LTP sync-gap + day P&L breakdown ─────────────────────
+            _snap        = snapshot.get(symbol, {})
+            _snap_pclose    = _snap.get("close",  None)
+            _snap_netchange = _snap.get("change", None)
+            _snap_ltp       = _snap.get("ltp",    None)   # LastTradedPrice from snapshot
+            _ltp_delta      = round(ltp - _snap_ltp, 4) if (_snap_ltp and _snap_ltp > 0) else None
             _day_pnl_diag   = round(qty * day_change_per_share, 2)
             logger.warning(
                 "5PAISA DAY-PNL DIAG [%s] symbol=%s qty=%.2f avg_price=%.4f "
-                "adapter_ltp=%.4f snap_PClose=%s snap_NetChange=%s "
+                "holdings_CurrentPrice=%.4f snap_LastTradedPrice=%s ltp_delta=%s "
+                "snap_PClose=%s snap_NetChange=%s "
                 "day_change_used=%.4f day_pnl=%.2f",
-                account_id, symbol, qty, avg_price, ltp,
-                f"{_snap_pclose:.4f}"    if _snap_pclose    is not None else "n/a",
-                f"{_snap_netchange:.4f}" if _snap_netchange is not None else "n/a",
+                account_id, symbol, qty, avg_price,
+                ltp,
+                f"{_snap_ltp:.4f}"      if _snap_ltp      is not None else "n/a",
+                f"{_ltp_delta:.4f}"     if _ltp_delta      is not None else "n/a",
+                f"{_snap_pclose:.4f}"   if _snap_pclose    is not None else "n/a",
+                f"{_snap_netchange:.4f}"if _snap_netchange is not None else "n/a",
                 day_change_per_share, _day_pnl_diag,
             )
             # ── END DIAGNOSTIC ────────────────────────────────────────────────────
