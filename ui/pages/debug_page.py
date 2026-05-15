@@ -90,6 +90,8 @@ def render(account_svc, portfolio_svc, aggregation_svc, md_svc, settings):
     if cfg and cfg.broker == "fivepaisa":
         with st.expander("8. 5paisa raw API investigation (positions_day / holdings)", expanded=True):
             _render_fivepaisa_raw(account_svc, selected)
+        with st.expander("9. 5paisa NetPosition — raw HTTP probe (bypasses py5paisa wrapper)", expanded=True):
+            _render_fivepaisa_netpos_raw_http(account_svc, selected)
 
 
 # ── Section renderers ─────────────────────────────────────────────────
@@ -1133,3 +1135,129 @@ def _render_fivepaisa_raw(account_svc, account_id: str):
                     "5PAISA HIST DIAG [%s] TOTAL unadj=%.2f adj=%.2f",
                     account_id, total_unadj, total_adj,
                 )
+
+
+def _render_fivepaisa_netpos_raw_http(account_svc, account_id: str):
+    """
+    Bypass py5paisa entirely: POST directly to V2/NetPositionNetWise and
+    V4/NetPosition using the authenticated session from the live adapter.
+
+    py5paisa's _user_info_request() mutates the shared GENERIC_PAYLOAD dict
+    in-place; stale fields from prior calls can corrupt subsequent requests.
+    This probe sends a known-clean minimal payload so the response reflects
+    the API contract, not wrapper state bugs.
+
+    According to official 5paisa docs, V2/NetPositionNetWise returns delivery
+    holdings with OrderFor="D", BodQty, PreviousClose, LTP, MTOM.
+    Goal: confirm whether MAZDA / INTLCONV / TGVSL / PGINVIT appear here.
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    if "fp_netpos_http_result" not in st.session_state:
+        st.session_state.fp_netpos_http_result = None
+
+    adapter = account_svc.get_adapter(account_id)
+    if adapter is None:
+        st.error(f"No active adapter for '{account_id}'.")
+        return
+    client = getattr(adapter, "_client", None)
+    if client is None:
+        st.error("Adapter _client is None — not authenticated.")
+        return
+
+    st.markdown(
+        "<div style='font-size:0.8rem;color:#8b949e;margin-bottom:8px;'>"
+        "Direct HTTP POST using <code>client.session</code> (py5paisa's own httpx session). "
+        "Payload is built fresh — no shared GENERIC_PAYLOAD mutation. "
+        "Headers include Bearer token and 5Paisa-API-Uid."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if st.button("POST to V2 + V4 NetPosition directly", key="fp_netpos_http_btn", type="primary"):
+        with st.spinner("Posting to both NetPosition endpoints…"):
+            _results = {}
+
+            # Build a clean, minimal payload matching py5paisa's _user_info_request
+            clean_payload = {
+                "head": {"key": client.USER_KEY},
+                "body": {"ClientCode": client.client_code},
+            }
+            headers = {
+                "Content-Type":   "application/json",
+                "Authorization":  f"Bearer {client.access_token}",
+                "5Paisa-API-Uid": "ka7SFqAU6SC",
+            }
+
+            endpoints = {
+                "V2/NetPositionNetWise": "https://Openapi.5paisa.com/VendorsAPI/Service1.svc/V2/NetPositionNetWise",
+                "V4/NetPosition":        "https://Openapi.5paisa.com/VendorsAPI/Service1.svc/V4/NetPosition",
+            }
+
+            for label, url in endpoints.items():
+                try:
+                    resp = client.session.post(url, json=clean_payload, headers=headers)
+                    raw  = resp.json()
+                    _logger.warning(
+                        "5PAISA NETPOS RAW HTTP [%s] %s status=%s raw=%r",
+                        account_id, label, resp.status_code, raw,
+                    )
+                    _results[label] = {
+                        "http_status": resp.status_code,
+                        "payload_sent": clean_payload,
+                        "response": raw,
+                    }
+                except Exception as exc:
+                    _logger.warning(
+                        "5PAISA NETPOS RAW HTTP [%s] %s FAILED: %s",
+                        account_id, label, exc,
+                    )
+                    _results[label] = {"error": str(exc), "payload_sent": clean_payload}
+
+        st.session_state.fp_netpos_http_result = _results
+
+    res = st.session_state.fp_netpos_http_result
+    if res:
+        for label, data in res.items():
+            st.markdown(f"#### `{label}`")
+
+            if "error" in data:
+                st.error(f"Request failed: {data['error']}")
+                continue
+
+            col_req, col_resp = st.columns(2)
+            with col_req:
+                st.markdown("**Payload sent**")
+                st.json(data.get("payload_sent", {}))
+            with col_resp:
+                st.markdown(f"**Response** (HTTP {data.get('http_status')})")
+                raw_resp = data.get("response", {})
+                st.json(raw_resp)
+
+            # Parse and highlight the key section
+            body = raw_resp.get("body", {}) if isinstance(raw_resp, dict) else {}
+            status_msg = body.get("Message", body.get("Status", "?"))
+            st.caption(f"body.Message = `{status_msg}`")
+
+            # Try to find the positions list under any plausible key
+            for key in ("NetPositionDetail", "Data", "Positions", "PositionDetail"):
+                detail = body.get(key)
+                if detail is not None:
+                    st.markdown(f"**`body.{key}`** — {len(detail) if isinstance(detail, list) else type(detail).__name__} records")
+                    if isinstance(detail, list) and detail:
+                        import pandas as pd
+                        try:
+                            st.dataframe(pd.DataFrame(detail), use_container_width=True, hide_index=True)
+                        except Exception:
+                            for rec in detail[:10]:
+                                st.json(rec)
+                    elif isinstance(detail, list) and not detail:
+                        st.info(f"body.{key} is an empty list.")
+                    break
+            else:
+                st.warning("No recognisable position list key found in response body. Check raw JSON above.")
+
+        if st.button("Clear", key="fp_netpos_http_clear"):
+            st.session_state.fp_netpos_http_result = None
+            st.rerun()
