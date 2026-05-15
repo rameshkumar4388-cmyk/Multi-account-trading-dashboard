@@ -870,25 +870,70 @@ def _render_fivepaisa_raw(account_svc, account_id: str):
                 except Exception as exc:
                     _error_depth = f"MarketSnapshot failed: {exc}"
 
-                depth_ltp = {}
+                # ── MarketDepth: try all three variants + multiple formats ──
+                # Previous probe returned Status=0/Success with empty quote
+                # fields — suggests request was accepted but instrument not
+                # matched.  Possible causes:
+                #   (a) ScripCode type: string vs int
+                #   (b) Field names: Exch/ExchType vs Exchange/ExchangeType
+                #   (c) NseCode != MarketDepth ScripCode identifier
+                # We try every permutation and log request + raw response.
+
+                depth_ltp      = {}
+                _raw_depth_all = {}   # {sym: {variant: response}}
+
                 for sym, (exch, sc) in scrip_info.items():
+                    _raw_depth_all[sym] = {}
+
+                    # Variant A — V3/MarketDepth, string ScripCode, Exch/ExchType
                     try:
-                        req  = [{"Exch": exch, "ExchType": "C", "ScripCode": sc}]
-                        resp = client.fetch_market_depth(req)
-                        _raw_depth_all[sym] = resp
-                        if isinstance(resp, dict):
-                            data = resp.get("Data", resp.get("MarketDepthData", []))
-                            if isinstance(data, list) and data:
-                                item    = data[0]
-                                ltp_val = (item.get("LTP") or item.get("LastTradedPrice")
-                                           or item.get("LastRate") or item.get("Ltp"))
-                                depth_ltp[sym] = float(ltp_val) if ltp_val else None
-                            elif isinstance(data, dict):
-                                ltp_val = (data.get("LTP") or data.get("LastTradedPrice")
-                                           or data.get("LastRate"))
-                                depth_ltp[sym] = float(ltp_val) if ltp_val else None
+                        req_a = [{"Exch": exch, "ExchType": "C", "ScripCode": sc}]
+                        _raw_depth_all[sym]["V3_str"] = {"req": req_a, "resp": client.fetch_market_depth(req_a)}
                     except Exception as exc:
-                        depth_ltp[sym] = f"ERR: {exc}"
+                        _raw_depth_all[sym]["V3_str"] = {"req": req_a, "error": str(exc)}
+
+                    # Variant B — V3/MarketDepth, int ScripCode, Exch/ExchType
+                    try:
+                        req_b = [{"Exch": exch, "ExchType": "C", "ScripCode": int(sc)}]
+                        _raw_depth_all[sym]["V3_int"] = {"req": req_b, "resp": client.fetch_market_depth(req_b)}
+                    except Exception as exc:
+                        _raw_depth_all[sym]["V3_int"] = {"req": req_b, "error": str(exc)}
+
+                    # Variant C — V1/MarketDepth by symbol, using Symbol name
+                    try:
+                        req_c = [{"Exch": exch, "ExchType": "C", "Symbol": sym}]
+                        _raw_depth_all[sym]["V1_sym"] = {"req": req_c, "resp": client.fetch_market_depth_by_symbol(req_c)}
+                    except Exception as exc:
+                        _raw_depth_all[sym]["V1_sym"] = {"req": req_c, "error": str(exc)}
+
+                    # Variant D — V3/MarketDepth, Exchange/ExchangeType like Snapshot
+                    try:
+                        req_d = [{"Exchange": exch, "ExchangeType": "C", "ScripCode": int(sc)}]
+                        _raw_depth_all[sym]["V3_snapfmt"] = {"req": req_d, "resp": client.fetch_market_depth(req_d)}
+                    except Exception as exc:
+                        _raw_depth_all[sym]["V3_snapfmt"] = {"req": req_d, "error": str(exc)}
+
+                    # Extract best LTP from any variant that returned a non-zero value
+                    _found_ltp = None
+                    for _variant, _vdata in _raw_depth_all[sym].items():
+                        _resp = _vdata.get("resp") if isinstance(_vdata, dict) else None
+                        if not isinstance(_resp, dict):
+                            continue
+                        _data = _resp.get("Data", _resp.get("MarketDepthData", []))
+                        _items = _data if isinstance(_data, list) else ([_data] if isinstance(_data, dict) else [])
+                        for _item in _items:
+                            if not isinstance(_item, dict):
+                                continue
+                            for _key in ("LTP", "LastTradedPrice", "LastRate", "Ltp", "ltp", "last_price"):
+                                _v = _item.get(_key)
+                                if _v and float(_v) > 0:
+                                    _found_ltp = float(_v)
+                                    break
+                            if _found_ltp:
+                                break
+                        if _found_ltp:
+                            break
+                    depth_ltp[sym] = _found_ltp
 
                 for r in raw_hold:
                     sym = (r.get("Symbol") or "").strip()
