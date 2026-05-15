@@ -179,6 +179,15 @@ class PortfolioService:
         for h in holdings:
             if h.instrument_type == "MF":
                 continue   # MF NAVs are EOD-only; no live quote injection
+
+            if h.broker == "fivepaisa":
+                # 5paisa: all of ltp, current_value, pnl, pnl_pct, day_change are
+                # set by the adapter from broker-native sources.  SP7086 ohlc must
+                # not overwrite any field — doing so creates a hybrid valuation model
+                # (confirmed ≈₹420 current_value drift where SP7086 resolves symbols
+                # but uses a different tick than the 5paisa broker).
+                continue
+
             ltp = self._md.get_ltp(h.symbol)
             if ltp and ltp > 0:
                 h.update_ltp(ltp)
@@ -186,19 +195,11 @@ class PortfolioService:
                 # It will be multiplied by quantity in the summary aggregation.
                 fresh_change     = self._md.get_change(h.symbol)
                 fresh_change_pct = self._md.get_change_pct(h.symbol)
-                # Only inject ohlc-based day_change for brokers that don't
-                # provide it natively in their holdings API.  5paisa holdings
-                # carry no broker-computed day_change; the ohlc close from
-                # SP7086 can diverge badly for instruments with recent corporate
-                # actions (e.g. InvIT/REIT unit distributions show as artificial
-                # losses). Leaving day_change at 0 is honest; injecting a wrong
-                # value produces a wildly incorrect day P&L.
                 # Zerodha: broker-native day_change from holdings API is canonical.
-                # 5paisa:  adapter provides it via MarketSnapshot; ohlc would diverge.
-                # Others:  inject from ohlc (no broker-provided day_change).
-                if fresh_change and h.broker not in ("zerodha", "fivepaisa"):
+                # Others (non-Zerodha, non-5paisa): inject from SP7086 ohlc.
+                if fresh_change and h.broker != "zerodha":
                     h.day_change = fresh_change          # ← per-share only, no × quantity
-                if fresh_change_pct and h.broker not in ("zerodha", "fivepaisa"):
+                if fresh_change_pct and h.broker != "zerodha":
                     h.day_change_pct = fresh_change_pct
         return holdings
 

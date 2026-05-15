@@ -348,17 +348,44 @@ class FivePaisaAdapter(BrokerAdapter):
         first = raw[0] if isinstance(raw[0], dict) else {}
         logger.info("5paisa holdings payload keys (first row): %s", list(first.keys()))
 
-        # ── DIAGNOSTIC: dump every field of every raw holding row ─────────────
-        # Goal: discover broker-native day P&L fields (DayGain, PreviousClose,
-        # DayChange, etc.) that may be present but previously unparsed.
-        # Remove after investigation is complete.
-        logger.warning("5PAISA RAW HOLDINGS DIAG [%s] %d rows", account_id, len(raw))
-        for _i, _r in enumerate(raw):
-            _sym = (_r.get("Symbol") or _r.get("Scrip") or f"row{_i}").strip()
-            # Log every key=value pair for this holding
-            _fields = " | ".join(f"{k}={v!r}" for k, v in _r.items())
-            logger.warning("5PAISA RAW HOLDINGS DIAG [%s] %s :: %s",
-                           account_id, _sym, _fields)
+        # ── DIAGNOSTIC: probe V4/NetPosition for broker-native BOD day P&L ────
+        # holdings() confirmed: no DayGain / PreviousClose / day-P&L fields.
+        # 5paisa docs: "positions for the day along with holdings as beginning
+        # of the day" — V4/NetPosition (positions_day()) may carry MTOM /
+        # PreviousClose / BODPositionPrice for CNC delivery holdings.
+        # Logging full raw response to verify.  Remove after investigation.
+        try:
+            _netpos_raw = self._client.positions_day()
+            if isinstance(_netpos_raw, dict):
+                _netpos_keys = list(_netpos_raw.keys())
+                _netpos_detail = _netpos_raw.get(
+                    "NetPositionDetail",
+                    _netpos_raw.get("Data", _netpos_raw.get("Positions", []))
+                )
+            elif isinstance(_netpos_raw, list):
+                _netpos_keys  = ["<list>"]
+                _netpos_detail = _netpos_raw
+            else:
+                _netpos_keys  = [str(type(_netpos_raw))]
+                _netpos_detail = []
+            logger.warning(
+                "5PAISA NETPOS DIAG [%s] type=%s top_keys=%s items=%d",
+                account_id, type(_netpos_raw).__name__,
+                _netpos_keys, len(_netpos_detail or []),
+            )
+            for _np in (_netpos_detail or [])[:20]:   # cap at 20 rows
+                if isinstance(_np, dict):
+                    _np_sym = (_np.get("Symbol") or _np.get("Scrip") or "?").strip()
+                    _np_fields = " | ".join(f"{k}={v!r}" for k, v in _np.items())
+                    logger.warning(
+                        "5PAISA NETPOS DIAG [%s] %s :: %s",
+                        account_id, _np_sym, _np_fields,
+                    )
+        except Exception as _netpos_exc:
+            logger.warning(
+                "5PAISA NETPOS DIAG [%s] positions_day() failed: %s",
+                account_id, _netpos_exc,
+            )
         # ── END DIAGNOSTIC ───────────────────────────────────────────────────
 
         # Build snapshot identifiers from NseCode / BseCode (exchange-appropriate).
