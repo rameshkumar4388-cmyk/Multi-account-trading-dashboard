@@ -423,20 +423,20 @@ class FivePaisaAdapter(BrokerAdapter):
                     symbol,
                 )
 
-            # ── DIAGNOSTIC: log per-holding day P&L breakdown ──────────
-            snap_pclose    = snapshot.get(symbol, {}).get("close",  None)
-            snap_netchange = snapshot.get(symbol, {}).get("change", None)
-            day_pnl_diag   = round(qty * day_change_per_share, 2)
+            # ── DIAGNOSTIC: per-holding day P&L breakdown (remove after diagnosis) ──
+            _snap_pclose    = snapshot.get(symbol, {}).get("close",  None)
+            _snap_netchange = snapshot.get(symbol, {}).get("change", None)
+            _day_pnl_diag   = round(qty * day_change_per_share, 2)
             logger.warning(
-                "5PAISA DAY-PNL DIAG | %s | qty=%.2f | avg=%.4f | ltp=%.4f "
-                "| snap_PClose=%s | snap_NetChange=%s "
-                "| day_change_used=%.4f | day_pnl=%.2f",
-                symbol, qty, avg_price, ltp,
-                f"{snap_pclose:.4f}" if snap_pclose is not None else "n/a",
-                f"{snap_netchange:.4f}" if snap_netchange is not None else "n/a",
-                day_change_per_share, day_pnl_diag,
+                "5PAISA DAY-PNL DIAG [%s] symbol=%s qty=%.2f avg_price=%.4f "
+                "adapter_ltp=%.4f snap_PClose=%s snap_NetChange=%s "
+                "day_change_used=%.4f day_pnl=%.2f",
+                account_id, symbol, qty, avg_price, ltp,
+                f"{_snap_pclose:.4f}"    if _snap_pclose    is not None else "n/a",
+                f"{_snap_netchange:.4f}" if _snap_netchange is not None else "n/a",
+                day_change_per_share, _day_pnl_diag,
             )
-            # ── END DIAGNOSTIC ──────────────────────────────────────────
+            # ── END DIAGNOSTIC ────────────────────────────────────────────────────
 
             sector = _NSE_SECTOR.get(symbol, "Other")
 
@@ -457,10 +457,10 @@ class FivePaisaAdapter(BrokerAdapter):
             h.day_change_pct = day_change_pct
             holdings.append(h)
 
-        total_day_pnl = round(sum(h.day_change * h.quantity for h in holdings), 2)
+        _total_day_pnl = round(sum(h.day_change * h.quantity for h in holdings), 2)
         logger.warning(
-            "5PAISA DAY-PNL DIAG | TOTAL holdings day P&L = %.2f | %d holdings",
-            total_day_pnl, len(holdings),
+            "5PAISA DAY-PNL DIAG [%s] TOTAL holdings_day_pnl=%.2f holdings=%d",
+            account_id, _total_day_pnl, len(holdings),
         )
         logger.info("5paisa get_holdings '%s': %d holdings", account_id, len(holdings))
         return holdings
