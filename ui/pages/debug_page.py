@@ -85,6 +85,12 @@ def render(account_svc, portfolio_svc, aggregation_svc, md_svc, settings):
     with st.expander("7. Market data feed — LTP for key symbols", expanded=False):
         _render_market_data(md_svc, portfolio_svc, selected)
 
+    # ── 5paisa raw API investigation ──────────────────────────────────
+    cfg = account_svc._account_configs.get(selected)
+    if cfg and cfg.broker == "fivepaisa":
+        with st.expander("8. 5paisa raw API investigation (positions_day / holdings)", expanded=True):
+            _render_fivepaisa_raw(account_svc, selected)
+
 
 # ── Section renderers ─────────────────────────────────────────────────
 
@@ -708,3 +714,106 @@ def _render_market_data(md_svc, portfolio_svc, account_id: str):
             f"MarketDataService returned no price for: {no_price}. "
             "These holdings will show at cost-basis value until the quote feed delivers a price."
         )
+
+
+def _render_fivepaisa_raw(account_svc, account_id: str):
+    """
+    5paisa-specific raw API investigation panel.
+    Calls positions_day() (V4/NetPosition) and holdings() directly via the
+    live authenticated FivePaisaAdapter client — no TTL cache, no CLI auth.
+    Goal: determine whether V4/NetPosition carries broker-native BOD day P&L
+    fields (MTOM, PreviousClose, BODPositionPrice) for delivery holdings.
+    """
+    import json
+
+    adapter = account_svc.get_adapter(account_id)
+    if adapter is None:
+        st.error(f"No active adapter for '{account_id}'. Check auth status.")
+        return
+
+    client = getattr(adapter, "_client", None)
+    if client is None:
+        st.error(f"Adapter exists but _client is None — adapter not authenticated.")
+        return
+
+    st.markdown(
+        "<div style='font-size:0.8rem;color:#8b949e;margin-bottom:10px;'>"
+        "Direct API calls via the live FivePaisaAdapter client. "
+        "Bypasses portfolio_service TTL cache. Press a button to trigger."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    col1, col2 = st.columns(2)
+    run_netpos  = col1.button("Call positions_day()  [V4/NetPosition]",  key="fp_netpos_btn")
+    run_holdings = col2.button("Call holdings()  [V3/Holding — raw fields]", key="fp_hold_btn")
+
+    # ── positions_day() ───────────────────────────────────────────────
+    if run_netpos:
+        st.markdown("### `positions_day()` — V4/NetPosition raw response")
+        try:
+            t0  = time.monotonic()
+            raw = client.positions_day()
+            elapsed = (time.monotonic() - t0) * 1000
+            st.caption(f"Returned in {elapsed:.0f} ms  |  type: {type(raw).__name__}")
+
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("5PAISA NETPOS DIAG [%s] positions_day() type=%s raw=%r",
+                           account_id, type(raw).__name__, raw)
+
+            if raw is None:
+                st.error("positions_day() returned None — API call failed or returned empty.")
+            elif isinstance(raw, dict):
+                st.markdown(f"**Top-level keys:** `{list(raw.keys())}`")
+                # Find the detail list under common key names
+                detail = raw.get("NetPositionDetail",
+                         raw.get("Data",
+                         raw.get("Positions",
+                         raw.get("PositionDetail", []))))
+                st.markdown(f"**Detail records:** {len(detail or [])}")
+                if detail:
+                    st.markdown("**First record keys:**")
+                    st.code(list(detail[0].keys()) if isinstance(detail[0], dict) else str(detail[0]))
+                    st.markdown("**All records:**")
+                    for i, rec in enumerate(detail[:20]):
+                        st.json(rec)
+                else:
+                    st.info("Detail list is empty — no BOD positions found.")
+                    st.markdown("**Full response:**")
+                    st.json(raw)
+            elif isinstance(raw, list):
+                st.markdown(f"**Response is a list with {len(raw)} items**")
+                for i, rec in enumerate(raw[:20]):
+                    st.json(rec)
+            else:
+                st.markdown(f"**Unexpected type:** `{type(raw)}`")
+                st.code(str(raw)[:2000])
+
+        except Exception as exc:
+            st.error(f"`positions_day()` raised: {exc}")
+            import logging
+            logging.getLogger(__name__).warning(
+                "5PAISA NETPOS DIAG [%s] positions_day() EXCEPTION: %s", account_id, exc
+            )
+
+    # ── holdings() raw fields ─────────────────────────────────────────
+    if run_holdings:
+        st.markdown("### `holdings()` — V3/Holding all raw fields")
+        try:
+            t0   = time.monotonic()
+            raw  = client.holdings()
+            elapsed = (time.monotonic() - t0) * 1000
+            st.caption(f"Returned {len(raw or [])} rows in {elapsed:.0f} ms")
+
+            if not raw:
+                st.info("holdings() returned empty list.")
+            else:
+                st.markdown(f"**Keys in first row:** `{list(raw[0].keys()) if isinstance(raw[0], dict) else '?'}`")
+                for rec in (raw or []):
+                    sym = rec.get("Symbol", "?") if isinstance(rec, dict) else "?"
+                    st.markdown(f"**{sym}**")
+                    st.json(rec)
+
+        except Exception as exc:
+            st.error(f"`holdings()` raised: {exc}")
