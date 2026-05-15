@@ -92,6 +92,8 @@ def render(account_svc, portfolio_svc, aggregation_svc, md_svc, settings):
             _render_fivepaisa_raw(account_svc, selected)
         with st.expander("9. 5paisa NetPosition — raw HTTP probe (bypasses py5paisa wrapper)", expanded=True):
             _render_fivepaisa_netpos_raw_http(account_svc, selected)
+        with st.expander("10. 5paisa MarketDepth — full response dump (LastRate / PClose)", expanded=True):
+            _render_fivepaisa_market_depth_dump(account_svc, selected)
 
 
 # ── Section renderers ─────────────────────────────────────────────────
@@ -1260,4 +1262,156 @@ def _render_fivepaisa_netpos_raw_http(account_svc, account_id: str):
 
         if st.button("Clear", key="fp_netpos_http_clear"):
             st.session_state.fp_netpos_http_result = None
+            st.rerun()
+
+
+def _render_fivepaisa_market_depth_dump(account_svc, account_id: str):
+    """
+    Direct HTTP POST to V3/MarketDepth using documented payload format:
+      [{"Exchange": "N", "ExchangeType": "C", "ScripCode": <NseCode>}]
+
+    Dumps the full MarketDepthData[0] object for each holding so we can
+    verify whether LastRate and PClose are present and match retail app prices.
+
+    Response fields documented by 5paisa:
+      LastRate  — current LTP  (key candidate to replace MarketSnapshot)
+      PClose    — previous close
+      OpenRate  — session open
+      High/Low  — session high/low
+      AvgRate   — average traded price
+      BidRate   — best bid
+      OffRate   — best offer
+      TickDt    — tick timestamp
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    V3_MARKET_DEPTH_URL = "https://Openapi.5paisa.com/VendorsAPI/Service1.svc/V3/MarketDepth"
+
+    if "fp_mktdepth_dump" not in st.session_state:
+        st.session_state.fp_mktdepth_dump = None
+
+    adapter = account_svc.get_adapter(account_id)
+    if adapter is None:
+        st.error("No active adapter.")
+        return
+    client = getattr(adapter, "_client", None)
+    if client is None:
+        st.error("Adapter _client is None.")
+        return
+
+    st.markdown(
+        "<div style='font-size:0.8rem;color:#8b949e;margin-bottom:8px;'>"
+        "Direct HTTP POST to V3/MarketDepth using documented payload format. "
+        "Shows the complete raw <code>MarketDepthData[0]</code> for every holding. "
+        "Key fields: <code>LastRate</code> (LTP) and <code>PClose</code> (prev close)."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if st.button("Dump V3/MarketDepth for all holdings", key="fp_mktdepth_btn", type="primary"):
+        with st.spinner("Fetching holdings + posting MarketDepth per symbol…"):
+            _depth_result = {}
+
+            # Get holdings to build symbol→NseCode map
+            try:
+                raw_hold = client.holdings()
+            except Exception as exc:
+                st.error(f"holdings() failed: {exc}")
+                raw_hold = []
+
+            headers = {
+                "Content-Type":   "application/json",
+                "Authorization":  f"Bearer {client.access_token}",
+                "5Paisa-API-Uid": "ka7SFqAU6SC",
+            }
+
+            for r in (raw_hold or []):
+                sym  = (r.get("Symbol") or "").strip()
+                exch = (r.get("Exch") or "N").strip()
+                sc   = str(r.get("NseCode") if exch == "N" else r.get("BseCode") or "").strip()
+                if not sym or not sc:
+                    continue
+
+                # Documented request format: Exchange / ExchangeType / ScripCode (int)
+                payload = {
+                    "head": {"key": client.USER_KEY},
+                    "body": {
+                        "Count":           "1",
+                        "MarketDepthData": [
+                            {
+                                "Exchange":     exch,      # "N" or "B"
+                                "ExchangeType": "C",       # C = cash/equity
+                                "ScripCode":    int(sc),   # numeric
+                            }
+                        ],
+                    },
+                }
+
+                try:
+                    resp     = client.session.post(V3_MARKET_DEPTH_URL, json=payload, headers=headers)
+                    raw_resp = resp.json()
+                    _logger.warning(
+                        "5PAISA MKTDEPTH DUMP [%s] symbol=%s sc=%s http=%d raw=%r",
+                        account_id, sym, sc, resp.status_code, raw_resp,
+                    )
+                    _depth_result[sym] = {
+                        "sc":          sc,
+                        "holdings_price": float(r.get("CurrentPrice") or 0),
+                        "http_status": resp.status_code,
+                        "payload":     payload,
+                        "response":    raw_resp,
+                    }
+                except Exception as exc:
+                    _logger.warning(
+                        "5PAISA MKTDEPTH DUMP [%s] symbol=%s FAILED: %s",
+                        account_id, sym, exc,
+                    )
+                    _depth_result[sym] = {"sc": sc, "error": str(exc), "payload": payload}
+
+        st.session_state.fp_mktdepth_dump = _depth_result
+
+    res = st.session_state.fp_mktdepth_dump
+    if res:
+        for sym, data in res.items():
+            hold_price = data.get("holdings_price", "?")
+            sc         = data.get("sc", "?")
+            st.markdown(f"#### {sym}  `ScripCode={sc}`  `holdings.CurrentPrice={hold_price}`")
+
+            if "error" in data:
+                st.error(f"Request failed: {data['error']}")
+                with st.expander("Payload sent", expanded=False):
+                    st.json(data.get("payload", {}))
+                continue
+
+            raw_resp   = data.get("response", {})
+            http_st    = data.get("http_status", "?")
+            body       = raw_resp.get("body", {}) if isinstance(raw_resp, dict) else {}
+            msg        = body.get("Message", "?")
+            st.caption(f"HTTP {http_st}  ·  body.Message = `{msg}`")
+
+            # Extract MarketDepthData list from response body
+            depth_data = body.get("Data", body.get("MarketDepthData", []))
+            if isinstance(depth_data, list) and depth_data:
+                first = depth_data[0]
+                last_rate = first.get("LastRate")
+                p_close   = first.get("PClose")
+                delta     = round(float(last_rate) - hold_price, 4) if last_rate else None
+
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("LastRate (LTP)",     f"{last_rate}" if last_rate else "absent")
+                col_b.metric("PClose (prev close)", f"{p_close}"  if p_close  else "absent")
+                col_c.metric("LastRate − holdings", f"{delta:+.4f}" if delta is not None else "n/a")
+
+                st.markdown("**Full `MarketDepthData[0]` object:**")
+                st.json(first)
+            else:
+                st.warning("MarketDepthData is empty or absent in response body.")
+                st.json(body)
+
+            with st.expander("Payload sent + full raw response", expanded=False):
+                st.json({"payload": data.get("payload", {}), "response": raw_resp})
+
+        if st.button("Clear", key="fp_mktdepth_clear"):
+            st.session_state.fp_mktdepth_dump = None
             st.rerun()
