@@ -744,9 +744,10 @@ def _render_fivepaisa_raw(account_svc, account_id: str):
         unsafe_allow_html=True,
     )
 
-    col1, col2 = st.columns(2)
-    run_netpos  = col1.button("Call positions_day()  [V4/NetPosition]",  key="fp_netpos_btn")
-    run_holdings = col2.button("Call holdings()  [V3/Holding — raw fields]", key="fp_hold_btn")
+    col1, col2, col3 = st.columns(3)
+    run_netpos   = col1.button("positions_day() [V4]",     key="fp_netpos_btn")
+    run_holdings = col2.button("holdings() raw fields",    key="fp_hold_btn")
+    run_hist     = col3.button("historical_data() vs MarketSnapshot ← run this", key="fp_hist_btn", type="primary")
 
     # ── positions_day() ───────────────────────────────────────────────
     if run_netpos:
@@ -817,3 +818,139 @@ def _render_fivepaisa_raw(account_svc, account_id: str):
 
         except Exception as exc:
             st.error(f"`holdings()` raised: {exc}")
+
+    # ── historical_data() vs MarketSnapshot comparison ────────────────
+    if run_hist:
+        st.markdown("### `historical_data()` adjusted close vs MarketSnapshot `PClose`")
+        st.caption(
+            "Hypothesis: MarketSnapshot PClose = unadjusted settlement price. "
+            "historical_data() 1d Close = adjusted close (ex-div, bonus etc). "
+            "If they differ on days with corporate actions, adjusted close matches the app."
+        )
+        import logging
+        import pandas as pd
+        from datetime import date, timedelta
+
+        _logger = logging.getLogger(__name__)
+
+        try:
+            raw_hold = client.holdings()
+        except Exception as exc:
+            st.error(f"holdings() failed: {exc}")
+            raw_hold = []
+
+        if not raw_hold:
+            st.warning("No holdings returned.")
+        else:
+            # Date range: last 5 calendar days to catch the most recent trading day
+            today_dt = date.today()
+            from_dt  = (today_dt - timedelta(days=5)).strftime("%Y-%m-%d")
+            to_dt    = (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+
+            # Build scrip_info: symbol → (exch, nse_code_str)
+            scrip_info = {}
+            for r in raw_hold:
+                sym  = (r.get("Symbol") or "").strip()
+                exch = (r.get("Exch") or "N").strip()
+                sc   = str(r.get("NseCode") if exch == "N" else r.get("BseCode") or "").strip()
+                if sym and sc:
+                    scrip_info[sym] = (exch, sc)
+
+            # Fetch MarketSnapshot for all holdings in one call
+            snapshot_pclose = {}
+            snapshot_netchange = {}
+            try:
+                snap_req = [{"Exchange": exch, "ExchangeType": "C", "ScripCode": sc}
+                            for _, (exch, sc) in scrip_info.items()]
+                snap_raw = client.fetch_market_snapshot(snap_req)
+                snap_detail = snap_raw.get("Data", []) if isinstance(snap_raw, dict) else []
+                sc_to_sym = {sc: sym for sym, (_, sc) in scrip_info.items()}
+                for item in snap_detail:
+                    if not isinstance(item, dict):
+                        continue
+                    sc_key = str(item.get("ScripCode") or item.get("Token") or "")
+                    sym = sc_to_sym.get(sc_key)
+                    if sym:
+                        snapshot_pclose[sym]    = item.get("PClose")
+                        snapshot_netchange[sym] = item.get("NetChange")
+            except Exception as exc:
+                st.warning(f"MarketSnapshot fetch failed: {exc}")
+
+            # Per-holding: call historical_data() and build comparison rows
+            rows = []
+            for r in raw_hold:
+                sym  = (r.get("Symbol") or "").strip()
+                if not sym:
+                    continue
+                qty          = float(r.get("Quantity") or r.get("Qty") or 0)
+                current_price = float(r.get("CurrentPrice") or 0)
+                exch, sc     = scrip_info.get(sym, ("N", ""))
+
+                hist_close = None
+                hist_error = None
+                if sc:
+                    try:
+                        df_hist = client.historical_data(
+                            Exch=exch,
+                            ExchangeSegment="C",
+                            ScripCode=int(sc),
+                            time="1d",
+                            From=from_dt,
+                            To=to_dt,
+                        )
+                        if df_hist is not None and not df_hist.empty:
+                            # Last row = most recent trading day close
+                            hist_close = float(df_hist.iloc[-1]["Close"])
+                        else:
+                            hist_error = "empty/None"
+                    except Exception as exc:
+                        hist_error = str(exc)[:60]
+
+                pclose     = snapshot_pclose.get(sym)
+                netchange  = snapshot_netchange.get(sym)
+
+                # Derived day changes
+                adj_day_change   = round(current_price - hist_close, 4) if hist_close else None
+                unadj_day_change = float(netchange) if netchange is not None else None
+
+                adj_day_pnl   = round(adj_day_change * qty, 2) if adj_day_change is not None else None
+                unadj_day_pnl = round(unadj_day_change * qty, 2) if unadj_day_change is not None else None
+
+                hist_vs_pclose = round(hist_close - float(pclose), 4) if (hist_close and pclose) else None
+
+                row = {
+                    "Symbol":              sym,
+                    "Qty":                 qty,
+                    "CurrentPrice":        current_price,
+                    "Snapshot_PClose":     pclose,
+                    "Snapshot_NetChange":  netchange,
+                    "Hist_Close (adj)":    hist_close if hist_close else hist_error,
+                    "Hist-PClose delta":   hist_vs_pclose,
+                    "Unadj_DayPnL":        unadj_day_pnl,
+                    "Adj_DayPnL":          adj_day_pnl,
+                }
+                rows.append(row)
+
+                _logger.warning(
+                    "5PAISA HIST DIAG [%s] symbol=%s qty=%.0f current=%.4f "
+                    "snap_PClose=%s snap_NetChange=%s hist_close=%s "
+                    "hist_pclose_delta=%s unadj_day_pnl=%s adj_day_pnl=%s",
+                    account_id, sym, qty, current_price,
+                    pclose, netchange, hist_close if hist_close else hist_error,
+                    hist_vs_pclose, unadj_day_pnl, adj_day_pnl,
+                )
+
+            if rows:
+                df_out = pd.DataFrame(rows)
+                st.dataframe(df_out, use_container_width=True, hide_index=True)
+
+                total_adj   = sum(r["Adj_DayPnL"]   for r in rows if r["Adj_DayPnL"]   is not None)
+                total_unadj = sum(r["Unadj_DayPnL"] for r in rows if r["Unadj_DayPnL"] is not None)
+                st.markdown(
+                    f"**Total unadjusted day P&L** (MarketSnapshot NetChange × Qty) = **₹{total_unadj:,.2f}**  \n"
+                    f"**Total adjusted day P&L** (historical_data Close × Qty) = **₹{total_adj:,.2f}**"
+                )
+                _logger.warning(
+                    "5PAISA HIST DIAG [%s] TOTAL unadj=%.2f adj=%.2f",
+                    account_id, total_unadj, total_adj,
+                )
