@@ -821,125 +821,137 @@ def _render_fivepaisa_raw(account_svc, account_id: str):
             st.error(f"`holdings()` raised: {exc}")
 
     # ── V3 MarketDepth vs MarketSnapshot LTP comparison ──────────────
+    import logging as _logging_depth
+    import pandas as _pd_depth
+    _logger_depth = _logging_depth.getLogger(__name__)
+
+    # Persist results across reruns so the table stays visible after the
+    # button triggers a Streamlit rerun.
+    if "fp_depth_result" not in st.session_state:
+        st.session_state.fp_depth_result = None
+
     if run_depth:
+        with st.spinner("Fetching MarketDepth and MarketSnapshot for all holdings…"):
+            _rows_depth = []
+            _raw_depth_all = {}
+            _error_depth = None
+
+            try:
+                raw_hold = client.holdings()
+            except Exception as exc:
+                _error_depth = f"holdings() failed: {exc}"
+                raw_hold = []
+
+            if raw_hold:
+                scrip_info = {}
+                for r in raw_hold:
+                    sym  = (r.get("Symbol") or "").strip()
+                    exch = (r.get("Exch") or "N").strip()
+                    sc   = str(r.get("NseCode") if exch == "N" else r.get("BseCode") or "").strip()
+                    if sym and sc:
+                        scrip_info[sym] = (exch, sc)
+
+                snap_ltp    = {}
+                snap_pclose = {}
+                try:
+                    snap_req    = [{"Exchange": exch, "ExchangeType": "C", "ScripCode": sc}
+                                   for _, (exch, sc) in scrip_info.items()]
+                    snap_raw    = client.fetch_market_snapshot(snap_req)
+                    snap_detail = snap_raw.get("Data", []) if isinstance(snap_raw, dict) else []
+                    sc_to_sym   = {sc: sym for sym, (_, sc) in scrip_info.items()}
+                    for item in snap_detail:
+                        if not isinstance(item, dict):
+                            continue
+                        sc_key = str(item.get("ScripCode") or item.get("Token") or "")
+                        sym = sc_to_sym.get(sc_key)
+                        if sym:
+                            snap_ltp[sym]    = item.get("LastTradedPrice")
+                            snap_pclose[sym] = item.get("PClose")
+                except Exception as exc:
+                    _error_depth = f"MarketSnapshot failed: {exc}"
+
+                depth_ltp = {}
+                for sym, (exch, sc) in scrip_info.items():
+                    try:
+                        req  = [{"Exch": exch, "ExchType": "C", "ScripCode": sc}]
+                        resp = client.fetch_market_depth(req)
+                        _raw_depth_all[sym] = resp
+                        if isinstance(resp, dict):
+                            data = resp.get("Data", resp.get("MarketDepthData", []))
+                            if isinstance(data, list) and data:
+                                item    = data[0]
+                                ltp_val = (item.get("LTP") or item.get("LastTradedPrice")
+                                           or item.get("LastRate") or item.get("Ltp"))
+                                depth_ltp[sym] = float(ltp_val) if ltp_val else None
+                            elif isinstance(data, dict):
+                                ltp_val = (data.get("LTP") or data.get("LastTradedPrice")
+                                           or data.get("LastRate"))
+                                depth_ltp[sym] = float(ltp_val) if ltp_val else None
+                    except Exception as exc:
+                        depth_ltp[sym] = f"ERR: {exc}"
+
+                for r in raw_hold:
+                    sym = (r.get("Symbol") or "").strip()
+                    if not sym:
+                        continue
+                    hold_price = float(r.get("CurrentPrice") or 0)
+                    s_ltp  = snap_ltp.get(sym)
+                    d_ltp  = depth_ltp.get(sym)
+                    s_pc   = snap_pclose.get(sym)
+                    s_f    = float(s_ltp) if s_ltp is not None and not isinstance(s_ltp, str) else None
+                    d_f    = float(d_ltp) if d_ltp is not None and not isinstance(d_ltp, str) else None
+
+                    s_hold = round(s_f - hold_price, 4) if s_f is not None else None
+                    d_hold = round(d_f - hold_price, 4) if d_f is not None else None
+                    s_d    = round(s_f - d_f,        4) if (s_f is not None and d_f is not None) else None
+
+                    _rows_depth.append({
+                        "Symbol":           sym,
+                        "holdings_Price":   hold_price,
+                        "Snapshot_LTP":     s_ltp,
+                        "Depth_LTP":        d_ltp,
+                        "Snapshot_PClose":  s_pc,
+                        "Snap-Hold delta":  s_hold,
+                        "Depth-Hold delta": d_hold,
+                        "Snap-Depth delta": s_d,
+                    })
+
+                    _logger_depth.warning(
+                        "5PAISA DEPTH DIAG [%s] symbol=%s holdings=%.4f "
+                        "snap_ltp=%s depth_ltp=%s pclose=%s "
+                        "snap_hold_delta=%s depth_hold_delta=%s snap_depth_delta=%s",
+                        account_id, sym, hold_price,
+                        s_ltp, d_ltp, s_pc, s_hold, d_hold, s_d,
+                    )
+
+        st.session_state.fp_depth_result = {
+            "rows":     _rows_depth,
+            "raw_all":  _raw_depth_all,
+            "error":    _error_depth,
+        }
+
+    # Render persisted result (survives reruns)
+    _res = st.session_state.fp_depth_result
+    if _res is not None:
         st.markdown("### V3/MarketDepth LTP vs MarketSnapshot LTP vs retail app")
         st.caption(
-            "If MarketDepth LTP consistently matches retail app prices, "
-            "it can replace MarketSnapshot as the quote source — no WebSocket needed. "
-            "If both REST sources give the same price, WebSocket is required."
+            "Snap-Hold delta ≈ 0: Snapshot matches holdings price.  "
+            "Depth-Hold delta ≈ 0: MarketDepth matches holdings price (and likely the app).  "
+            "Snap-Depth delta ≈ 0: both REST sources use the same pipeline → WebSocket needed."
         )
-        import logging, pandas as pd
-        _logger = logging.getLogger(__name__)
-
-        try:
-            raw_hold = client.holdings()
-        except Exception as exc:
-            st.error(f"holdings() failed: {exc}")
-            raw_hold = []
-
-        if not raw_hold:
-            st.warning("No holdings returned.")
-        else:
-            # Build scrip_info: symbol → (exch, nse_code)
-            scrip_info = {}
-            for r in raw_hold:
-                sym  = (r.get("Symbol") or "").strip()
-                exch = (r.get("Exch") or "N").strip()
-                sc   = str(r.get("NseCode") if exch == "N" else r.get("BseCode") or "").strip()
-                if sym and sc:
-                    scrip_info[sym] = (exch, sc)
-
-            # ── MarketSnapshot for all symbols ────────────────────────
-            snap_ltp   = {}
-            snap_pclose = {}
-            try:
-                snap_req    = [{"Exchange": exch, "ExchangeType": "C", "ScripCode": sc}
-                               for _, (exch, sc) in scrip_info.items()]
-                snap_raw    = client.fetch_market_snapshot(snap_req)
-                snap_detail = snap_raw.get("Data", []) if isinstance(snap_raw, dict) else []
-                sc_to_sym   = {sc: sym for sym, (_, sc) in scrip_info.items()}
-                for item in snap_detail:
-                    if not isinstance(item, dict):
-                        continue
-                    sc_key = str(item.get("ScripCode") or item.get("Token") or "")
-                    sym = sc_to_sym.get(sc_key)
-                    if sym:
-                        snap_ltp[sym]    = item.get("LastTradedPrice")
-                        snap_pclose[sym] = item.get("PClose")
-            except Exception as exc:
-                st.warning(f"MarketSnapshot failed: {exc}")
-
-            # ── V3 MarketDepth — one call per symbol (batching untested) ─
-            depth_ltp = {}
-            depth_raw_all = {}
-            for sym, (exch, sc) in scrip_info.items():
-                try:
-                    req = [{"Exch": exch, "ExchType": "C", "ScripCode": sc}]
-                    resp = client.fetch_market_depth(req)
-                    depth_raw_all[sym] = resp   # store full response for inspection
-                    # Navigate to LTP — field name varies; try common ones
-                    if isinstance(resp, dict):
-                        data = resp.get("Data", resp.get("MarketDepthData", []))
-                        if isinstance(data, list) and data:
-                            item = data[0]
-                            ltp_val = (item.get("LTP") or item.get("LastTradedPrice")
-                                       or item.get("LastRate") or item.get("Ltp"))
-                            depth_ltp[sym] = float(ltp_val) if ltp_val else None
-                        elif isinstance(data, dict):
-                            ltp_val = (data.get("LTP") or data.get("LastTradedPrice")
-                                       or data.get("LastRate"))
-                            depth_ltp[sym] = float(ltp_val) if ltp_val else None
-                except Exception as exc:
-                    depth_ltp[sym] = f"ERR: {exc}"
-
-            # ── Build comparison table ────────────────────────────────
-            rows = []
-            for r in raw_hold:
-                sym = (r.get("Symbol") or "").strip()
-                if not sym:
-                    continue
-                hold_price  = float(r.get("CurrentPrice") or 0)
-                s_ltp       = snap_ltp.get(sym)
-                d_ltp       = depth_ltp.get(sym)
-                s_pc        = snap_pclose.get(sym)
-
-                s_ltp_f  = float(s_ltp)  if s_ltp  is not None and not isinstance(s_ltp, str)  else None
-                d_ltp_f  = float(d_ltp)  if d_ltp  is not None and not isinstance(d_ltp, str)  else None
-
-                snap_vs_hold  = round(s_ltp_f  - hold_price, 4) if s_ltp_f  is not None else None
-                depth_vs_hold = round(d_ltp_f  - hold_price, 4) if d_ltp_f  is not None else None
-                snap_vs_depth = round(s_ltp_f  - d_ltp_f,   4) if (s_ltp_f is not None and d_ltp_f is not None) else None
-
-                rows.append({
-                    "Symbol":              sym,
-                    "holdings_Price":      hold_price,
-                    "Snapshot_LTP":        s_ltp,
-                    "Depth_LTP":           d_ltp,
-                    "Snapshot_PClose":     s_pc,
-                    "Snap-Hold delta":     snap_vs_hold,
-                    "Depth-Hold delta":    depth_vs_hold,
-                    "Snap-Depth delta":    snap_vs_depth,
-                })
-
-                _logger.warning(
-                    "5PAISA DEPTH DIAG [%s] symbol=%s holdings=%.4f "
-                    "snap_ltp=%s depth_ltp=%s pclose=%s "
-                    "snap_hold_delta=%s depth_hold_delta=%s snap_depth_delta=%s",
-                    account_id, sym, hold_price,
-                    s_ltp, d_ltp, s_pc,
-                    snap_vs_hold, depth_vs_hold, snap_vs_depth,
-                )
-
-            if rows:
-                df_out = pd.DataFrame(rows)
-                st.dataframe(df_out, use_container_width=True, hide_index=True)
-
-            # Show raw depth response for any symbol where delta is large
-            st.markdown("---")
-            st.markdown("**Raw V3/MarketDepth responses** (for field inspection)")
-            for sym, raw_resp in depth_raw_all.items():
-                with st.expander(f"{sym} — raw MarketDepth response", expanded=False):
-                    st.json(raw_resp)
+        if _res.get("error"):
+            st.warning(_res["error"])
+        if _res["rows"]:
+            st.dataframe(_pd_depth.DataFrame(_res["rows"]),
+                         use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.markdown("**Raw V3/MarketDepth responses** (field inspection)")
+        for sym, raw_resp in (_res.get("raw_all") or {}).items():
+            with st.expander(f"{sym} — raw MarketDepth response", expanded=True):
+                st.json(raw_resp)
+        if st.button("Clear result", key="fp_depth_clear"):
+            st.session_state.fp_depth_result = None
+            st.rerun()
 
     # ── historical_data() vs MarketSnapshot comparison ────────────────
     if run_hist:
