@@ -87,8 +87,10 @@ class AccountService:
             return
 
         for cfg in self._account_configs.values():
-            # In live mode: check token store for a fresher access_token
-            if self._settings.app_mode == "live" and self._db and cfg.broker == "zerodha":
+            # In live mode: check token store for a fresher access_token.
+            # Applies to Zerodha and 5paisa — both use daily tokens persisted
+            # to SQLite by refresh_session(); the .env token is the fallback.
+            if self._settings.app_mode == "live" and self._db and cfg.broker in ("zerodha", "fivepaisa"):
                 self._maybe_load_stored_token(cfg)
             self._init_account(cfg)
 

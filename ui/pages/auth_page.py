@@ -39,8 +39,8 @@ _PENDING_AUTH: dict = {}
 # Brokers that appear in the auth page reconnect flow
 _AUTH_BROKERS = {"zerodha", "fivepaisa"}
 
-# 5paisa portal URL for manual token retrieval
-_FIVEPAISA_PORTAL_URL = "https://trade.5paisa.com/"
+# 5paisa login URL for daily token retrieval
+_FIVEPAISA_PORTAL_URL = "https://login.5paisa.com/login"
 
 
 def _exchange_token(api_key: str, api_secret: str, request_token: str) -> Optional[str]:
