@@ -39,8 +39,33 @@ _PENDING_AUTH: dict = {}
 # Brokers that appear in the auth page reconnect flow
 _AUTH_BROKERS = {"zerodha", "fivepaisa"}
 
-# 5paisa login URL for daily token retrieval
-_FIVEPAISA_PORTAL_URL = "https://login.5paisa.com/login"
+def _fivepaisa_totp_auth(cfg, pin: str, totp: str) -> Optional[str]:
+    """
+    Exchange 5paisa TOTP credentials for an access_token using py5paisa.
+    All API credentials come from the existing account config; the user
+    supplies only their PIN and the current 6-digit TOTP code.
+    Returns the access_token string or None on failure.
+    """
+    try:
+        from py5paisa import FivePaisaClient
+        cred = {
+            "APP_NAME":       cfg.credentials.get("app_name", ""),
+            "APP_SOURCE":     cfg.credentials.get("app_source", ""),
+            "USER_ID":        cfg.credentials.get("user_id", ""),
+            "USER_KEY":       cfg.credentials.get("user_key", ""),
+            "ENCRYPTION_KEY": cfg.credentials.get("encryption_key", ""),
+            "PASSWORD":       cfg.credentials.get("password", "dummy"),
+        }
+        client_code = cfg.credentials.get("client_code", "")
+        if not client_code:
+            logger.error("5paisa TOTP auth: client_code missing from config for '%s'", cfg.account_id if hasattr(cfg, 'account_id') else '?')
+            return None
+        client = FivePaisaClient(cred=cred)
+        token = client.get_totp_session(client_code, totp, pin)
+        return token if token else None
+    except Exception as exc:
+        logger.error("5paisa TOTP auth failed: %s", exc)
+        return None
 
 
 def _exchange_token(api_key: str, api_secret: str, request_token: str) -> Optional[str]:
@@ -225,53 +250,56 @@ def _render_zerodha_login(target_id: str, cfg, portfolio_svc, account_svc):
 
 def _render_fivepaisa_login(target_id: str, cfg, portfolio_svc, account_svc):
     """
-    5paisa manual token entry flow.
-    5paisa does not redirect back to the dashboard — the user must obtain
-    the access_token from the 5paisa portal and paste it here.
+    5paisa TOTP authentication — fully dashboard-native.
+    No browser redirect; no external token copy-paste.
+    Persistent API credentials (APP_NAME, APP_SOURCE, USER_ID, USER_KEY,
+    ENCRYPTION_KEY, CLIENT_CODE) come from the existing account config.
+    The user supplies only their PIN and the current TOTP code.
     """
-    st.markdown("**Step 1 — Get new access token from 5paisa**")
-    st.markdown(
-        f"<a href='{_FIVEPAISA_PORTAL_URL}' target='_blank'>"
-        f"<button style='background:#238636;color:#fff;border:none;border-radius:6px;"
-        f"padding:8px 20px;font-size:0.85rem;font-weight:600;cursor:pointer;"
-        f"margin-bottom:8px;'>Open Login ↗</button></a>",
-        unsafe_allow_html=True,
-    )
     st.caption(
-        "Log in to 5paisa and copy your access token from the portal. "
-        "Tokens are issued daily and must be refreshed each session."
+        "Enter your 5paisa PIN and the current 6-digit code from your authenticator app. "
+        "All other credentials are loaded from your existing configuration."
     )
 
-    st.markdown("**Step 2 — Paste new access token**")
-    new_token = st.text_input(
-        "5paisa Access Token",
-        key="fivepaisa_token_input",
-        placeholder="Paste new access_token here…",
-        type="password",
-    )
-    if st.button("Connect", key="fivepaisa_connect_btn"):
-        if not new_token.strip():
-            st.warning("Please paste your access token first.")
+    pin  = st.text_input("PIN", key="fp_pin_input",  type="password",
+                         placeholder="Your 5paisa PIN")
+    totp = st.text_input("TOTP", key="fp_totp_input", max_chars=6,
+                         placeholder="6-digit code from authenticator app")
+
+    if st.button("Reconnect 5paisa", key="fp_reconnect_btn", type="primary"):
+        pin_val  = pin.strip()
+        totp_val = totp.strip()
+
+        if not pin_val or not totp_val:
+            st.warning("Enter both PIN and TOTP code.")
+        elif not totp_val.isdigit() or len(totp_val) != 6:
+            st.warning("TOTP must be exactly 6 digits.")
         else:
-            with st.spinner(f"Reconnecting {cfg.display_name}…"):
+            with st.spinner(f"Authenticating {cfg.display_name}…"):
+                access_token = _fivepaisa_totp_auth(cfg, pin_val, totp_val)
+
+            if not access_token:
+                st.error(
+                    "TOTP authentication failed. "
+                    "Check your PIN, TOTP code (codes expire every 30 s), and API credentials."
+                )
+            else:
                 ok = account_svc.refresh_session(
                     account_id=target_id,
-                    access_token=new_token.strip(),
+                    access_token=access_token,
                 )
-            if ok:
-                if portfolio_svc:
-                    portfolio_svc.invalidate(target_id)
-                st.success(
-                    f"✓ {cfg.display_name} reconnected. "
-                    "Session is active for this app instance."
-                )
-                logger.info("5paisa manual token refresh succeeded for '%s'", target_id)
-                st.rerun()
-            else:
-                h2 = account_svc.get_health().get(target_id)
-                st.error(
-                    f"Authentication failed: {h2.error if h2 else 'check access token and credentials'}"
-                )
+                if ok:
+                    if portfolio_svc:
+                        portfolio_svc.invalidate(target_id)
+                    st.success(
+                        f"✓ {cfg.display_name} connected. "
+                        "Token stored — will survive app restarts until it expires."
+                    )
+                    logger.info("5paisa TOTP auth succeeded for '%s'", target_id)
+                    st.rerun()
+                else:
+                    h2 = account_svc.get_health().get(target_id)
+                    st.error(f"Session refresh failed: {h2.error if h2 else 'unknown error'}")
 
 
 # ── Main render ────────────────────────────────────────────────────────
