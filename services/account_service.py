@@ -314,6 +314,29 @@ class AccountService:
             )
         return session
 
+    def get_market_data_fivepaisa_adapter(self) -> Optional[object]:
+        """
+        Return an active FivePaisaAdapter to use as the market-data source.
+
+        Checks market_data_account_id first; falls back to any active 5paisa
+        adapter.  Returns None only if no 5paisa adapter is authenticated.
+        """
+        mid = self._settings.market_data_account_id
+        if mid:
+            adapter = self._adapters.get(mid)
+            if adapter and getattr(adapter, "broker_name", "") == "fivepaisa":
+                return adapter
+
+        for adapter in self._adapters.values():
+            if getattr(adapter, "broker_name", "") == "fivepaisa":
+                return adapter
+
+        logger.error(
+            "get_market_data_fivepaisa_adapter: no active 5paisa adapter — "
+            "check FIVEPAISA_* credentials and token"
+        )
+        return None
+
     def get_all_symbols(self) -> List[str]:
         symbols: List[str] = []
         for aid, adapter in self._adapters.items():

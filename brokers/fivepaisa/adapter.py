@@ -151,6 +151,8 @@ class FivePaisaAdapter(BrokerAdapter):
         self._account_id: str = ""
         self._credentials: dict = {}
         self._last_auth_error: Optional[str] = None
+        self._scrip_cache: Dict[str, tuple] = {}    # symbol → (exch_char, scrip_code_str)
+        self._scrip_master: Dict[str, str] = {}     # SymbolRoot → ScripCode (NSE cash, lazy)
 
     # ------------------------------------------------------------------
     # BrokerAdapter protocol
@@ -336,6 +338,93 @@ class FivePaisaAdapter(BrokerAdapter):
             logger.warning("5paisa _fetch_market_snapshot failed: %s", exc)
             return {}
 
+    def _load_scrip_master(self) -> None:
+        """
+        Download and index the 5paisa scrip master (NSE cash segment only).
+        Lazy-loaded once per process; cached in self._scrip_master.
+        No authentication required — public endpoint.
+        Covers equities, indices (NIFTY=999920000, BANKNIFTY=999920005), and
+        all stock-option underlyings regardless of whether they are held.
+        """
+        if self._scrip_master or not self._client:
+            return
+        try:
+            records = self._client.get_scrips()
+            if records is None or (hasattr(records, "empty") and records.empty):
+                logger.warning("5paisa _load_scrip_master: get_scrips() returned empty")
+                return
+            nse_cash = records[
+                (records["Exch"] == "N") & (records["ExchType"] == "C")
+            ]
+            master: Dict[str, str] = {}
+            for _, row in nse_cash.iterrows():
+                sym_root = str(row.get("SymbolRoot") or "").strip()
+                sc       = str(row.get("ScripCode") or "").strip()
+                if sym_root and sc and sym_root not in master:
+                    master[sym_root] = sc
+            self._scrip_master = master
+            logger.info(
+                "5paisa _load_scrip_master: %d NSE cash symbols indexed "
+                "(NIFTY=%s BANKNIFTY=%s)",
+                len(master),
+                master.get("NIFTY", "MISSING"),
+                master.get("BANKNIFTY", "MISSING"),
+            )
+        except Exception as exc:
+            logger.warning("5paisa _load_scrip_master failed: %s", exc)
+
+    def fetch_quotes_for_symbols(self, symbols: List[str]) -> Dict[str, dict]:
+        """
+        Fetch live quotes for the given symbol list via _fetch_market_snapshot().
+
+        Resolution order per symbol:
+          1. _scrip_cache  — equity holdings (populated by get_holdings each cycle)
+          2. _scrip_master — full NSE cash scrip master (lazy-loaded once per process)
+
+        Covers: equity holdings, stock-option underlyings not held in 5paisa,
+        NIFTY (ScripCode 999920000), BANKNIFTY (999920005), FINNIFTY (999920041).
+        Returns {symbol: {"ltp", "close", "change", "change_pct"}}.
+        Unresolvable symbols are silently skipped and logged at DEBUG.
+        """
+        if not self._client or not symbols:
+            return {}
+
+        if not self._scrip_master:
+            self._load_scrip_master()
+
+        scrip_info: Dict[str, tuple] = {}
+        unresolved: List[str] = []
+        for sym in symbols:
+            if sym in self._scrip_cache:
+                scrip_info[sym] = self._scrip_cache[sym]
+            elif sym in self._scrip_master:
+                sc = self._scrip_master[sym]
+                scrip_info[sym] = ("N", sc)
+                self._scrip_cache[sym] = ("N", sc)  # warm for next cycle
+            else:
+                unresolved.append(sym)
+
+        if unresolved:
+            logger.debug(
+                "fetch_quotes_for_symbols: %d unresolved (no scrip code): %s",
+                len(unresolved), unresolved[:15],
+            )
+
+        if not scrip_info:
+            logger.warning(
+                "fetch_quotes_for_symbols: 0/%d symbols resolved — "
+                "scrip master may not have loaded yet",
+                len(symbols),
+            )
+            return {}
+
+        result = self._fetch_market_snapshot(scrip_info)
+        logger.info(
+            "fetch_quotes_for_symbols: %d/%d resolved  unresolved=%d",
+            len(result), len(symbols), len(unresolved),
+        )
+        return result
+
     def get_holdings(self, account_id: str) -> List[Holding]:
         if not self.is_session_valid(account_id):
             return []
@@ -406,6 +495,7 @@ class FivePaisaAdapter(BrokerAdapter):
 
         if scrip_info:
             logger.info("5paisa holdings: snapshot request for %d symbols", len(scrip_info))
+            self._scrip_cache.update(scrip_info)   # warm cache for fetch_quotes_for_symbols
         else:
             logger.warning(
                 "5paisa holdings: NseCode/BseCode absent from payload — "
