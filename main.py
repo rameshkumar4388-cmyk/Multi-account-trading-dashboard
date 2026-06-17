@@ -82,24 +82,16 @@ def _get_aggregation_service(_account_svc, _portfolio_svc):
 
 def _build_quote_symbols(aggregation_svc) -> list:
     """
-    Collect every symbol that needs a live quote this render cycle.
-
-    Calls get_combined_positions() and get_combined_holdings() which are
-    TTL-cached in PortfolioService (30 s), so broker API calls only fire
-    when the cache is cold — not on every Streamlit rerun.
+    Build the minimal quote symbol list for MarketDataService.
+    Always includes NIFTY and BANKNIFTY.
+    Adds the underlying for each open option position (CE/PE, quantity != 0).
+    Holdings are excluded — they carry broker-provided LTP and P&L directly.
     """
-    symbols: set = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+    symbols: set = {"NIFTY", "BANKNIFTY"}
     try:
         for p in aggregation_svc.get_combined_positions():
-            symbols.add(p.symbol)
-            if p.underlying and p.underlying != p.symbol:
+            if p.quantity != 0 and p.instrument_type in ("CE", "PE") and p.underlying:
                 symbols.add(p.underlying)
-    except Exception:
-        pass
-    try:
-        for h in aggregation_svc.get_combined_holdings():
-            if h.instrument_type != "MF":
-                symbols.add(h.symbol)
     except Exception:
         pass
     return list(symbols)

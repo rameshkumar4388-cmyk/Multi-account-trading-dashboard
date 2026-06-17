@@ -62,6 +62,8 @@ class MarketDataService:
         if not symbols:
             return
 
+        logger.info("MarketDataService.refresh: requested symbols = %s", sorted(symbols))
+
         if self._settings.app_mode != "live":
             self._mock_refresh(symbols)
             return
