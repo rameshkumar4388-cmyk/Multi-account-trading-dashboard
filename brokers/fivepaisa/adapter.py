@@ -155,6 +155,7 @@ class FivePaisaAdapter(BrokerAdapter):
         self._last_auth_error: Optional[str] = None
         self._scrip_cache: Dict[str, tuple] = {}    # symbol → (exch_char, scrip_code_str)
         self._scrip_master: Dict[str, str] = {}     # SymbolRoot → ScripCode (NSE cash, lazy)
+        self._scrip_master_failed: bool = False     # stop retrying after confirmed failure
 
     # ------------------------------------------------------------------
     # BrokerAdapter protocol
@@ -375,7 +376,7 @@ class FivePaisaAdapter(BrokerAdapter):
         (https://Openapi.5paisa.com/VendorsAPI/Service1.svc/ScripMaster/segment/All)
         with an explicit timeout.  Bypasses get_scrips() which swallows errors.
         """
-        if self._scrip_master or not self._client:
+        if self._scrip_master or self._scrip_master_failed or not self._client:
             return
         try:
             import csv as csv_module
@@ -438,61 +439,122 @@ class FivePaisaAdapter(BrokerAdapter):
                 master.get("BANKNIFTY", "MISSING"),
             )
         except Exception as exc:
-            logger.warning("5paisa _load_scrip_master failed: %s", exc, exc_info=True)
+            self._scrip_master_failed = True
+            logger.warning(
+                "5paisa _load_scrip_master failed (will not retry): %s", exc,
+            )
+
+    def _fetch_prices_by_symbol(self, symbols: List[str]) -> Dict[str, dict]:
+        """
+        Fetch LTP + previous close by NSE symbol name via fetch_market_depth_by_symbol.
+
+        Used as fallback for symbols not in _scrip_cache (e.g. NIFTY, BANKNIFTY,
+        and stock option underlyings not held in the portfolio).
+        Returns {symbol: {"ltp", "close", "change", "change_pct"}}.
+        """
+        if not self._client or not symbols:
+            return {}
+        try:
+            req_list = [
+                {"Exch": "N", "ExchType": "C", "Symbol": sym}
+                for sym in symbols
+            ]
+            logger.info("_fetch_prices_by_symbol: querying %s", symbols)
+            raw = self._client.fetch_market_depth_by_symbol(req_list)
+            if not raw:
+                logger.warning("_fetch_prices_by_symbol: empty response for %s", symbols)
+                return {}
+
+            # Detect API-level errors
+            if isinstance(raw, dict):
+                msg = (raw.get("Message") or raw.get("message") or "").strip()
+                if msg and msg.lower() not in ("", "success"):
+                    logger.warning("_fetch_prices_by_symbol: API error — %r", msg)
+                    return {}
+
+            # Response: body.Data list or direct list
+            items: list = []
+            if isinstance(raw, dict):
+                body  = raw.get("body") or raw
+                items = body.get("Data") or body.get("MarketDepthData") or []
+            elif isinstance(raw, list):
+                items = raw
+
+            logger.info("_fetch_prices_by_symbol: raw keys sample=%s",
+                        list(items[0].keys()) if items else [])
+
+            result: Dict[str, dict] = {}
+            sym_set = set(symbols)
+            for item in (items or []):
+                if not isinstance(item, dict):
+                    continue
+                sym = (item.get("Symbol") or item.get("SymbolRoot") or "").strip()
+                if sym not in sym_set:
+                    continue
+                ltp    = _safe_float(item.get("LastTradedPrice") or item.get("LTP") or 0)
+                close  = _safe_float(item.get("PClose") or item.get("Close")
+                                     or item.get("PreviousClose") or 0)
+                change = _safe_float(item.get("NetChange") or item.get("Change") or 0)
+                if change == 0 and close > 0 and ltp > 0:
+                    change = round(ltp - close, 4)
+                chg_pct = round(change / close * 100, 4) if close else 0.0
+                if ltp > 0:
+                    result[sym] = {"ltp": ltp, "close": close,
+                                   "change": change, "change_pct": chg_pct}
+
+            logger.info(
+                "_fetch_prices_by_symbol: resolved %d/%d symbols",
+                len(result), len(symbols),
+            )
+            return result
+        except Exception as exc:
+            logger.warning("_fetch_prices_by_symbol failed: %s", exc, exc_info=True)
+            return {}
 
     def fetch_quotes_for_symbols(self, symbols: List[str]) -> Dict[str, dict]:
         """
-        Fetch live quotes for the given symbol list via _fetch_market_snapshot().
+        Fetch live quotes for the given symbol list.
 
         Resolution order per symbol:
           1. _scrip_cache  — equity holdings (populated by get_holdings each cycle)
-          2. _scrip_master — full NSE cash scrip master (lazy-loaded once per process)
+          2. _scrip_master — full NSE cash scrip master (lazy-loaded once; skipped if failed)
+          3. fetch_market_depth_by_symbol — name-based lookup for NIFTY/BANKNIFTY
+             and any stock-option underlyings not present in the portfolio
 
-        Covers: equity holdings, stock-option underlyings not held in 5paisa,
-        NIFTY (ScripCode 999920000), BANKNIFTY (999920005), FINNIFTY (999920041).
         Returns {symbol: {"ltp", "close", "change", "change_pct"}}.
-        Unresolvable symbols are silently skipped and logged at DEBUG.
         """
         if not self._client or not symbols:
             return {}
 
-        if not self._scrip_master:
+        if not self._scrip_master and not self._scrip_master_failed:
             self._load_scrip_master()
 
         scrip_info: Dict[str, tuple] = {}
-        unresolved: List[str] = []
+        name_lookup: List[str] = []
         for sym in symbols:
             if sym in self._scrip_cache:
                 scrip_info[sym] = self._scrip_cache[sym]
             elif sym in self._scrip_master:
                 sc = self._scrip_master[sym]
                 scrip_info[sym] = ("N", sc)
-                self._scrip_cache[sym] = ("N", sc)  # warm for next cycle
+                self._scrip_cache[sym] = ("N", sc)
             else:
-                unresolved.append(sym)
-
-        if unresolved:
-            logger.debug(
-                "fetch_quotes_for_symbols: %d unresolved (no scrip code): %s",
-                len(unresolved), unresolved[:15],
-            )
-
-        if not scrip_info:
-            logger.warning(
-                "fetch_quotes_for_symbols: 0/%d symbols resolved — "
-                "scrip master may not have loaded yet",
-                len(symbols),
-            )
-            return {}
+                name_lookup.append(sym)
 
         logger.info(
-            "fetch_quotes_for_symbols: requested=%d  resolved=%d  unresolved=%d",
-            len(symbols), len(scrip_info), len(unresolved),
+            "fetch_quotes_for_symbols: requested=%d  scrip_cache=%d  name_lookup=%d",
+            len(symbols), len(scrip_info), len(name_lookup),
         )
-        result = self._fetch_market_snapshot(scrip_info)
+
+        result: Dict[str, dict] = {}
+        if scrip_info:
+            result.update(self._fetch_market_snapshot(scrip_info))
+        if name_lookup:
+            result.update(self._fetch_prices_by_symbol(name_lookup))
+
         logger.info(
-            "fetch_quotes_for_symbols: snapshot returned %d/%d prices  unresolved=%d",
-            len(result), len(symbols), len(unresolved),
+            "fetch_quotes_for_symbols: total returned=%d/%d",
+            len(result), len(symbols),
         )
         return result
 
