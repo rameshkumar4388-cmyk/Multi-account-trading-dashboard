@@ -370,26 +370,59 @@ class FivePaisaAdapter(BrokerAdapter):
         """
         Download and index the 5paisa scrip master (NSE cash segment only).
         Lazy-loaded once per process; cached in self._scrip_master.
-        No authentication required — public endpoint.
-        Covers equities, indices (NIFTY=999920000, BANKNIFTY=999920005), and
-        all stock-option underlyings regardless of whether they are held.
+
+        Bypasses py5paisa's get_scrips() which silently swallows errors and
+        returns empty on failure. Makes the HTTP call directly so timeout and
+        error details are visible in logs.
         """
         if self._scrip_master or not self._client:
             return
         try:
-            records = self._client.get_scrips()
-            if records is None or (hasattr(records, "empty") and records.empty):
-                logger.warning("5paisa _load_scrip_master: get_scrips() returned empty")
+            import io
+            import requests
+            import pandas as pd
+
+            URL = "https://images.5paisa.com/website/scripmaster-new-csv.csv"
+            logger.info("5paisa _load_scrip_master: downloading from %s", URL)
+            resp = requests.get(URL, timeout=60)
+            resp.raise_for_status()
+
+            records = pd.read_csv(io.StringIO(resp.text), low_memory=False)
+            logger.info(
+                "5paisa _load_scrip_master: %d rows downloaded, columns=%s",
+                len(records), list(records.columns),
+            )
+
+            if records.empty:
+                logger.warning("5paisa _load_scrip_master: CSV downloaded but is empty")
                 return
+
+            # Normalise column names — handle variations across API versions
+            col_map = {c.strip().lower(): c for c in records.columns}
+            exch_col     = col_map.get("exch") or col_map.get("exchange")
+            exchtype_col = col_map.get("exchtype") or col_map.get("exchangetype")
+            symroot_col  = col_map.get("symbolroot") or col_map.get("symbol") or col_map.get("name")
+            sc_col       = col_map.get("scripcode") or col_map.get("code") or col_map.get("token")
+
+            if not all([exch_col, exchtype_col, symroot_col, sc_col]):
+                logger.warning(
+                    "5paisa _load_scrip_master: expected columns not found — "
+                    "exch=%s exchtype=%s symroot=%s sc=%s | available: %s",
+                    exch_col, exchtype_col, symroot_col, sc_col,
+                    list(records.columns),
+                )
+                return
+
             nse_cash = records[
-                (records["Exch"] == "N") & (records["ExchType"] == "C")
+                (records[exch_col] == "N") & (records[exchtype_col] == "C")
             ]
             master: Dict[str, str] = {}
             for _, row in nse_cash.iterrows():
-                sym_root = str(row.get("SymbolRoot") or "").strip()
-                sc       = str(row.get("ScripCode") or "").strip()
+                sym_root = str(row.get(symroot_col) or "").strip()
+                sc       = str(row.get(sc_col) or "").strip()
                 if sym_root and sc and sym_root not in master:
                     master[sym_root] = sc
+
             self._scrip_master = master
             logger.info(
                 "5paisa _load_scrip_master: %d NSE cash symbols indexed "
@@ -399,7 +432,7 @@ class FivePaisaAdapter(BrokerAdapter):
                 master.get("BANKNIFTY", "MISSING"),
             )
         except Exception as exc:
-            logger.warning("5paisa _load_scrip_master failed: %s", exc)
+            logger.warning("5paisa _load_scrip_master failed: %s", exc, exc_info=True)
 
     def fetch_quotes_for_symbols(self, symbols: List[str]) -> Dict[str, dict]:
         """
