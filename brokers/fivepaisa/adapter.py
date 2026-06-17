@@ -371,38 +371,44 @@ class FivePaisaAdapter(BrokerAdapter):
         Download and index the 5paisa scrip master (NSE cash segment only).
         Lazy-loaded once per process; cached in self._scrip_master.
 
-        Bypasses py5paisa's get_scrips() which silently swallows errors and
-        returns empty on failure. Makes the HTTP call directly so timeout and
-        error details are visible in logs.
+        Uses the client's own authenticated session and SCRIP_MASTER_ROUTE
+        (https://Openapi.5paisa.com/VendorsAPI/Service1.svc/ScripMaster/segment/All)
+        with an explicit timeout.  Bypasses get_scrips() which swallows errors.
         """
         if self._scrip_master or not self._client:
             return
         try:
+            import csv as csv_module
             import io
-            import requests
             import pandas as pd
 
-            URL = "https://images.5paisa.com/website/scripmaster-new-csv.csv"
-            logger.info("5paisa _load_scrip_master: downloading from %s", URL)
-            resp = requests.get(URL, timeout=60)
+            url     = self._client.SCRIP_MASTER_ROUTE
+            session = self._client.session
+            logger.info("5paisa _load_scrip_master: fetching %s", url)
+            resp = session.get(url, timeout=60)
             resp.raise_for_status()
 
-            records = pd.read_csv(io.StringIO(resp.text), low_memory=False)
+            data    = resp.content.decode("utf-8").strip()
+            reader  = csv_module.DictReader(io.StringIO(data))
+            records = pd.DataFrame(reader)
+
             logger.info(
                 "5paisa _load_scrip_master: %d rows downloaded, columns=%s",
                 len(records), list(records.columns),
             )
 
             if records.empty:
-                logger.warning("5paisa _load_scrip_master: CSV downloaded but is empty")
+                logger.warning("5paisa _load_scrip_master: response is empty")
                 return
 
             # Normalise column names — handle variations across API versions
-            col_map = {c.strip().lower(): c for c in records.columns}
+            col_map      = {c.strip().lower(): c for c in records.columns}
             exch_col     = col_map.get("exch") or col_map.get("exchange")
             exchtype_col = col_map.get("exchtype") or col_map.get("exchangetype")
-            symroot_col  = col_map.get("symbolroot") or col_map.get("symbol") or col_map.get("name")
-            sc_col       = col_map.get("scripcode") or col_map.get("code") or col_map.get("token")
+            symroot_col  = (col_map.get("symbolroot") or col_map.get("symbol")
+                            or col_map.get("name"))
+            sc_col       = (col_map.get("scripcode") or col_map.get("code")
+                            or col_map.get("token"))
 
             if not all([exch_col, exchtype_col, symroot_col, sc_col]):
                 logger.warning(
