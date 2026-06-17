@@ -71,6 +71,8 @@ logger = logging.getLogger(__name__)
 # Matches: NIFTY25JUNFUT → NIFTY, BANKNIFTY25JUN44000PE → BANKNIFTY
 _FNO_UNDERLYING_RE = re.compile(r"^([A-Z&]+?)(\d{2}[A-Z]{3}|\d{5})")
 
+_SNAPSHOT_BATCH_SIZE = 50  # 5paisa MarketSnapshot scrip-per-request cap
+
 # 5paisa date format: "/Date(1750000000000)/" — milliseconds since epoch
 _DATE_RE = re.compile(r"/Date\((\d+)\)/")
 
@@ -284,52 +286,78 @@ class FivePaisaAdapter(BrokerAdapter):
                 {"Exchange": exch, "ExchangeType": "C", "ScripCode": sc}
                 for _sym, (exch, sc) in scrip_info.items()
             ]
-            raw = self._client.fetch_market_snapshot(req_list)
-            if not raw:
-                return {}
-
-            # fetch_market_snapshot returns res["body"] — a dict with "Data" key
-            items = raw.get("Data", []) if isinstance(raw, dict) else (
-                raw if isinstance(raw, list) else []
-            )
-
             # String-normalise keys so lookups work whether ScripCode comes
             # back as int (5606) or str ("5606") from the API.
             code_to_sym = {str(sc): sym for sym, (_exch, sc) in scrip_info.items()}
 
-            result = {}
-            for item in (items or []):
-                if not isinstance(item, dict):
+            total    = len(req_list)
+            n_batches = (total + _SNAPSHOT_BATCH_SIZE - 1) // _SNAPSHOT_BATCH_SIZE
+            logger.info(
+                "5paisa _fetch_market_snapshot: %d scrips → %d batch(es) of ≤%d",
+                total, n_batches, _SNAPSHOT_BATCH_SIZE,
+            )
+
+            result: Dict[str, dict] = {}
+            for b_idx, b_start in enumerate(range(0, total, _SNAPSHOT_BATCH_SIZE), 1):
+                batch = req_list[b_start : b_start + _SNAPSHOT_BATCH_SIZE]
+                logger.info(
+                    "5paisa _fetch_market_snapshot: batch %d/%d  scrips=%d",
+                    b_idx, n_batches, len(batch),
+                )
+                raw = self._client.fetch_market_snapshot(batch)
+                if not raw:
+                    logger.warning(
+                        "5paisa _fetch_market_snapshot: batch %d/%d empty response",
+                        b_idx, n_batches,
+                    )
                     continue
-                # Normalise ScripCode to str for dict lookup
-                sc  = str(item.get("ScripCode") or item.get("Token") or "")
-                sym = code_to_sym.get(sc)
-                if not sym:
-                    continue
 
-                # Verified field names from live 5paisa MarketSnapshot response:
-                #   PClose          — previous session close
-                #   NetChange       — day change (LTP − PClose)
-                #   LastTradedPrice — current LTP at snapshot call time
-                close    = _safe_float(item.get("PClose") or 0)
-                change   = _safe_float(item.get("NetChange") or 0)
-                ltp_snap = _safe_float(item.get("LastTradedPrice") or 0)
+                # Detect API-level errors ("Scrip Limit Exceeded.", auth errors, etc.)
+                if isinstance(raw, dict):
+                    msg = (raw.get("Message") or "").strip()
+                    if msg and msg.lower() not in ("", "success"):
+                        logger.warning(
+                            "5paisa _fetch_market_snapshot: batch %d/%d API error — %r  raw=%s",
+                            b_idx, n_batches, msg, raw,
+                        )
+                        continue
 
-                # Derive change from LTP − PClose when NetChange is absent/zero
-                if change == 0 and close > 0 and ltp_snap > 0:
-                    change = round(ltp_snap - close, 4)
+                # fetch_market_snapshot returns res["body"] — a dict with "Data" key
+                items = raw.get("Data", []) if isinstance(raw, dict) else (
+                    raw if isinstance(raw, list) else []
+                )
 
-                chg_pct = round(change / close * 100, 4) if close else 0.0
+                for item in (items or []):
+                    if not isinstance(item, dict):
+                        continue
+                    sc  = str(item.get("ScripCode") or item.get("Token") or "")
+                    sym = code_to_sym.get(sc)
+                    if not sym:
+                        continue
 
-                result[sym] = {
-                    "close":      close,
-                    "change":     change,
-                    "change_pct": chg_pct,
-                    "ltp":        ltp_snap,   # snapshot LTP — for sync-gap diagnosis
-                }
+                    # Verified field names from live 5paisa MarketSnapshot response:
+                    #   PClose          — previous session close
+                    #   NetChange       — day change (LTP − PClose)
+                    #   LastTradedPrice — current LTP at snapshot call time
+                    close    = _safe_float(item.get("PClose") or 0)
+                    change   = _safe_float(item.get("NetChange") or 0)
+                    ltp_snap = _safe_float(item.get("LastTradedPrice") or 0)
+
+                    # Derive change from LTP − PClose when NetChange is absent/zero
+                    if change == 0 and close > 0 and ltp_snap > 0:
+                        change = round(ltp_snap - close, 4)
+
+                    chg_pct = round(change / close * 100, 4) if close else 0.0
+
+                    result[sym] = {
+                        "close":      close,
+                        "change":     change,
+                        "change_pct": chg_pct,
+                        "ltp":        ltp_snap,   # snapshot LTP — for sync-gap diagnosis
+                    }
 
             logger.info(
-                "5paisa _fetch_market_snapshot: %d / %d symbols resolved",
+                "5paisa _fetch_market_snapshot: %d / %d symbols resolved total",
                 len(result), len(scrip_info),
             )
             return result
@@ -418,9 +446,13 @@ class FivePaisaAdapter(BrokerAdapter):
             )
             return {}
 
+        logger.info(
+            "fetch_quotes_for_symbols: requested=%d  resolved=%d  unresolved=%d",
+            len(symbols), len(scrip_info), len(unresolved),
+        )
         result = self._fetch_market_snapshot(scrip_info)
         logger.info(
-            "fetch_quotes_for_symbols: %d/%d resolved  unresolved=%d",
+            "fetch_quotes_for_symbols: snapshot returned %d/%d prices  unresolved=%d",
             len(result), len(symbols), len(unresolved),
         )
         return result

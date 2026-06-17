@@ -321,14 +321,16 @@ class AccountService:
         Checks market_data_account_id first; falls back to any active 5paisa
         adapter.  Returns None only if no 5paisa adapter is authenticated.
         """
+        from brokers.fivepaisa.adapter import FivePaisaAdapter
+
         mid = self._settings.market_data_account_id
         if mid:
             adapter = self._adapters.get(mid)
-            if adapter and getattr(adapter, "broker_name", "") == "fivepaisa":
+            if isinstance(adapter, FivePaisaAdapter):
                 return adapter
 
         for adapter in self._adapters.values():
-            if getattr(adapter, "broker_name", "") == "fivepaisa":
+            if isinstance(adapter, FivePaisaAdapter):
                 return adapter
 
         logger.error(
