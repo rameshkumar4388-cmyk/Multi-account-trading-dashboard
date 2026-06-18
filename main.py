@@ -85,7 +85,7 @@ def _build_quote_symbols(aggregation_svc) -> list:
     Collect every symbol that needs a live quote this render cycle.
 
     Calls get_combined_positions() and get_combined_holdings() which are
-    TTL-cached in PortfolioService (30 s), so broker API calls only fire
+    TTL-cached in PortfolioService (5 s), so broker API calls only fire
     when the cache is cold — not on every Streamlit rerun.
     """
     symbols: set = {"NIFTY", "BANKNIFTY", "FINNIFTY"}

@@ -193,13 +193,13 @@ class PortfolioService:
                 h.update_ltp(ltp)
                 # day_change must stay as PER-SHARE price change (not total value).
                 # It will be multiplied by quantity in the summary aggregation.
+                # SP7086 ohlc.close == Zerodha's close_price for EQ holdings —
+                # injecting from md_svc gives truly live values on every render.
                 fresh_change     = self._md.get_change(h.symbol)
                 fresh_change_pct = self._md.get_change_pct(h.symbol)
-                # Zerodha: broker-native day_change from holdings API is canonical.
-                # Others (non-Zerodha, non-5paisa): inject from SP7086 ohlc.
-                if fresh_change and h.broker != "zerodha":
+                if fresh_change:
                     h.day_change = fresh_change          # ← per-share only, no × quantity
-                if fresh_change_pct and h.broker != "zerodha":
+                if fresh_change_pct:
                     h.day_change_pct = fresh_change_pct
         return holdings
 
