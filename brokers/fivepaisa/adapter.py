@@ -76,6 +76,18 @@ _SNAPSHOT_BATCH_SIZE = 50  # 5paisa MarketSnapshot scrip-per-request cap
 # 5paisa date format: "/Date(1750000000000)/" — milliseconds since epoch
 _DATE_RE = re.compile(r"/Date\((\d+)\)/")
 
+# Stable 5paisa index scrip codes (Exchange="N", ExchangeType="C").
+# Pre-seeded into _scrip_cache so NIFTY/BANKNIFTY/FINNIFTY bypass
+# the scrip master (which stores them as "NIFTY 50" / "NIFTY BANK")
+# and the unreliable name-based fallback entirely.
+_INDEX_SCRIP_CODES: Dict[str, tuple] = {
+    "NIFTY":      ("N", "999920000"),
+    "BANKNIFTY":  ("N", "999920005"),
+    "FINNIFTY":   ("N", "999920041"),
+    "MIDCPNIFTY": ("N", "999920042"),
+    "SENSEX":     ("B", "999901138"),
+}
+
 
 def _extract_underlying(symbol: str) -> str:
     m = _FNO_UNDERLYING_RE.match(symbol)
@@ -153,7 +165,9 @@ class FivePaisaAdapter(BrokerAdapter):
         self._account_id: str = ""
         self._credentials: dict = {}
         self._last_auth_error: Optional[str] = None
-        self._scrip_cache: Dict[str, tuple] = {}    # symbol → (exch_char, scrip_code_str)
+        # Pre-seed with stable index scrip codes so NIFTY/BANKNIFTY never
+        # fall through to the scrip master or name-based lookup.
+        self._scrip_cache: Dict[str, tuple] = dict(_INDEX_SCRIP_CODES)
         self._scrip_master: Dict[str, str] = {}     # SymbolRoot → ScripCode (NSE cash, lazy)
         self._scrip_master_failed: bool = False     # stop retrying after confirmed failure
 
@@ -480,8 +494,11 @@ class FivePaisaAdapter(BrokerAdapter):
             elif isinstance(raw, list):
                 items = raw
 
-            logger.info("_fetch_prices_by_symbol: raw keys sample=%s",
-                        list(items[0].keys()) if items else [])
+            if items:
+                logger.info("_fetch_prices_by_symbol: raw keys sample=%s",
+                            list(items[0].keys()))
+            else:
+                logger.warning("_fetch_prices_by_symbol: empty items — raw=%s", raw)
 
             result: Dict[str, dict] = {}
             sym_set = set(symbols)
@@ -491,7 +508,9 @@ class FivePaisaAdapter(BrokerAdapter):
                 sym = (item.get("Symbol") or item.get("SymbolRoot") or "").strip()
                 if sym not in sym_set:
                     continue
-                ltp    = _safe_float(item.get("LastTradedPrice") or item.get("LTP") or 0)
+                # /V1/MarketDepth uses "LastRate"; /MarketSnapshot uses "LastTradedPrice"
+                ltp    = _safe_float(item.get("LastRate") or item.get("LastTradedPrice")
+                                     or item.get("LTP") or 0)
                 close  = _safe_float(item.get("PClose") or item.get("Close")
                                      or item.get("PreviousClose") or 0)
                 change = _safe_float(item.get("NetChange") or item.get("Change") or 0)
