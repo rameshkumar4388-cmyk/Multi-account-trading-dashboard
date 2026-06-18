@@ -1,26 +1,43 @@
 """
 Market data service — synchronous, deterministic quote fetcher.
 
+Replaces the background polling + subscription model with a simple
+on-demand batch fetch via SP7086's KiteConnect session.
+
 Data flow per render cycle (orchestrated by main.py):
   1. _build_quote_symbols() collects all needed symbols from cached data
-  2. md_svc.refresh(symbols) calls FivePaisaAdapter.fetch_quotes_for_symbols()
+  2. md_svc.refresh(symbols) calls kite.ohlc(all_instruments) once via SP7086
   3. All get_ltp()/get_change()/get_close() calls read from that snapshot
 
-fetch_quotes_for_symbols() resolves symbols via:
-  - _scrip_cache (equity holdings, populated each cycle)
-  - _scrip_master (full NSE cash scrip master, lazy-loaded once per process)
-This covers equity holdings, stock-option underlyings, and indices
-(NIFTY=999920000, BANKNIFTY=999920005, FINNIFTY=999920041).
+kite.ohlc() is used instead of kite.ltp() because it returns both
+last_price AND ohlc.close (previous-day settlement price) in one call,
+enabling local computation of change, change_pct, and positions day_pnl.
 
+SP7086 is the ONLY account used for any quote/LTP/index call.
+Other Zerodha accounts (VU5420, CL0502, FXU722, DA1898) never touch this.
 No background threads. No subscriptions. No stale caches.
 """
 from __future__ import annotations
 
 import logging
 import random
+import re
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Zerodha canonical instrument strings for indices
+_INDEX_ALIASES: Dict[str, str] = {
+    "NIFTY":      "NSE:NIFTY 50",
+    "BANKNIFTY":  "NSE:NIFTY BANK",
+    "FINNIFTY":   "NSE:NIFTY FIN SERVICE",
+    "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+    "SENSEX":     "BSE:SENSEX",
+}
+
+_MONTHS = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC"
+_FNO_MONTHLY = re.compile(rf"\d{{2}}(?:{_MONTHS})")
+_FNO_WEEKLY  = re.compile(r"\d{5}")
 
 _MOCK_BASE: Dict[str, float] = {
     "NIFTY": 24480.0, "BANKNIFTY": 52400.0, "FINNIFTY": 23100.0,
@@ -31,6 +48,17 @@ _MOCK_BASE: Dict[str, float] = {
     "NIFTY25JUNFUT": 24520.0, "RELIANCE25JUNFUT": 2847.5,
     "NIFTY2561924500CE": 187.3, "BANKNIFTY2561944000PE": 278.5,
 }
+
+
+def _to_instrument(symbol: str) -> str:
+    """Convert plain symbol name to Zerodha ltp() instrument string."""
+    if symbol in _INDEX_ALIASES:
+        return _INDEX_ALIASES[symbol]
+    if symbol.endswith("FUT"):
+        return f"NFO:{symbol}"
+    if _FNO_MONTHLY.search(symbol) or _FNO_WEEKLY.search(symbol):
+        return f"NFO:{symbol}"
+    return f"NSE:{symbol}"
 
 
 class MarketDataService:
@@ -54,46 +82,53 @@ class MarketDataService:
 
     def refresh(self, symbols: List[str]) -> None:
         """
-        Fetch quotes for all symbols via 5paisa fetch_market_snapshot().
-        Returns last_price + previous-day close, enabling local computation
-        of change, change_pct, and positions day_pnl.
-        Symbols are resolved via scrip cache (holdings) and scrip master fallback.
+        Fetch quotes for all symbols via kite.ohlc() in one batched call via SP7086.
+        ohlc() returns last_price + previous-day close, enabling local computation
+        of change, change_pct, and positions day_pnl without relying on stale
+        broker-cached fields. Batched in groups of 200 (Zerodha ohlc limit).
         """
         if not symbols:
             return
-
-        logger.info("MarketDataService.refresh: requested symbols = %s", sorted(symbols))
 
         if self._settings.app_mode != "live":
             self._mock_refresh(symbols)
             return
 
-        adapter = self._account_svc.get_market_data_fivepaisa_adapter()
-        if adapter is None:
+        kite = self._account_svc.get_market_data_kite_session()
+        if kite is None:
             logger.warning(
-                "MarketDataService.refresh: no 5paisa adapter available — "
+                "MarketDataService.refresh: SP7086 session unavailable — "
                 "quote snapshot not updated"
             )
             return
 
-        snapshot = adapter.fetch_quotes_for_symbols(symbols)
+        instruments = [_to_instrument(s) for s in symbols]
+        instrument_map = dict(zip(instruments, symbols))
 
         new_prices: Dict[str, float] = {}
         new_closes: Dict[str, float] = {}
-        for sym, data in snapshot.items():
-            ltp   = float(data.get("ltp") or 0)
-            close = float(data.get("close") or 0)
-            if ltp > 0:
-                new_prices[sym] = ltp
-            if close > 0:
-                new_closes[sym] = close
+        for i in range(0, len(instruments), 200):
+            batch = instruments[i:i + 200]
+            try:
+                data = kite.ohlc(batch)
+                for inst, info in data.items():
+                    plain = instrument_map.get(inst, inst.split(":")[-1])
+                    ltp   = float(info.get("last_price", 0))
+                    close = float((info.get("ohlc") or {}).get("close", 0))
+                    if ltp > 0:
+                        new_prices[plain] = ltp
+                    if close > 0:
+                        new_closes[plain] = close
+            except Exception as exc:
+                logger.warning(
+                    "kite.ohlc() batch [%d symbols] failed: %s", len(batch), exc
+                )
 
         self._prices = new_prices
         self._closes = new_closes
-        logger.info(
-            "MarketDataService.refresh: %d prices, %d closes via 5paisa snapshot "
-            "(requested=%d)",
-            len(new_prices), len(new_closes), len(symbols),
+        logger.debug(
+            "MarketDataService.refresh: %d prices, %d closes fetched",
+            len(new_prices), len(new_closes),
         )
 
     def _mock_refresh(self, symbols: List[str]) -> None:

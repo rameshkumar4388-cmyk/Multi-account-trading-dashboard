@@ -71,22 +71,8 @@ logger = logging.getLogger(__name__)
 # Matches: NIFTY25JUNFUT → NIFTY, BANKNIFTY25JUN44000PE → BANKNIFTY
 _FNO_UNDERLYING_RE = re.compile(r"^([A-Z&]+?)(\d{2}[A-Z]{3}|\d{5})")
 
-_SNAPSHOT_BATCH_SIZE = 50  # 5paisa MarketSnapshot scrip-per-request cap
-
 # 5paisa date format: "/Date(1750000000000)/" — milliseconds since epoch
 _DATE_RE = re.compile(r"/Date\((\d+)\)/")
-
-# Stable 5paisa index scrip codes (Exchange="N", ExchangeType="C").
-# Pre-seeded into _scrip_cache so NIFTY/BANKNIFTY/FINNIFTY bypass
-# the scrip master (which stores them as "NIFTY 50" / "NIFTY BANK")
-# and the unreliable name-based fallback entirely.
-_INDEX_SCRIP_CODES: Dict[str, tuple] = {
-    "NIFTY":      ("N", "999920000"),
-    "BANKNIFTY":  ("N", "999920005"),
-    "FINNIFTY":   ("N", "999920041"),
-    "MIDCPNIFTY": ("N", "999920042"),
-    "SENSEX":     ("B", "999901138"),
-}
 
 
 def _extract_underlying(symbol: str) -> str:
@@ -165,11 +151,6 @@ class FivePaisaAdapter(BrokerAdapter):
         self._account_id: str = ""
         self._credentials: dict = {}
         self._last_auth_error: Optional[str] = None
-        # Pre-seed with stable index scrip codes so NIFTY/BANKNIFTY never
-        # fall through to the scrip master or name-based lookup.
-        self._scrip_cache: Dict[str, tuple] = dict(_INDEX_SCRIP_CODES)
-        self._scrip_master: Dict[str, str] = {}     # SymbolRoot → ScripCode (NSE cash, lazy)
-        self._scrip_master_failed: bool = False     # stop retrying after confirmed failure
 
     # ------------------------------------------------------------------
     # BrokerAdapter protocol
@@ -301,78 +282,52 @@ class FivePaisaAdapter(BrokerAdapter):
                 {"Exchange": exch, "ExchangeType": "C", "ScripCode": sc}
                 for _sym, (exch, sc) in scrip_info.items()
             ]
+            raw = self._client.fetch_market_snapshot(req_list)
+            if not raw:
+                return {}
+
+            # fetch_market_snapshot returns res["body"] — a dict with "Data" key
+            items = raw.get("Data", []) if isinstance(raw, dict) else (
+                raw if isinstance(raw, list) else []
+            )
+
             # String-normalise keys so lookups work whether ScripCode comes
             # back as int (5606) or str ("5606") from the API.
             code_to_sym = {str(sc): sym for sym, (_exch, sc) in scrip_info.items()}
 
-            total    = len(req_list)
-            n_batches = (total + _SNAPSHOT_BATCH_SIZE - 1) // _SNAPSHOT_BATCH_SIZE
-            logger.info(
-                "5paisa _fetch_market_snapshot: %d scrips → %d batch(es) of ≤%d",
-                total, n_batches, _SNAPSHOT_BATCH_SIZE,
-            )
-
-            result: Dict[str, dict] = {}
-            for b_idx, b_start in enumerate(range(0, total, _SNAPSHOT_BATCH_SIZE), 1):
-                batch = req_list[b_start : b_start + _SNAPSHOT_BATCH_SIZE]
-                logger.info(
-                    "5paisa _fetch_market_snapshot: batch %d/%d  scrips=%d",
-                    b_idx, n_batches, len(batch),
-                )
-                raw = self._client.fetch_market_snapshot(batch)
-                if not raw:
-                    logger.warning(
-                        "5paisa _fetch_market_snapshot: batch %d/%d empty response",
-                        b_idx, n_batches,
-                    )
+            result = {}
+            for item in (items or []):
+                if not isinstance(item, dict):
+                    continue
+                # Normalise ScripCode to str for dict lookup
+                sc  = str(item.get("ScripCode") or item.get("Token") or "")
+                sym = code_to_sym.get(sc)
+                if not sym:
                     continue
 
-                # Detect API-level errors ("Scrip Limit Exceeded.", auth errors, etc.)
-                if isinstance(raw, dict):
-                    msg = (raw.get("Message") or "").strip()
-                    if msg and msg.lower() not in ("", "success"):
-                        logger.warning(
-                            "5paisa _fetch_market_snapshot: batch %d/%d API error — %r  raw=%s",
-                            b_idx, n_batches, msg, raw,
-                        )
-                        continue
+                # Verified field names from live 5paisa MarketSnapshot response:
+                #   PClose          — previous session close
+                #   NetChange       — day change (LTP − PClose)
+                #   LastTradedPrice — current LTP at snapshot call time
+                close    = _safe_float(item.get("PClose") or 0)
+                change   = _safe_float(item.get("NetChange") or 0)
+                ltp_snap = _safe_float(item.get("LastTradedPrice") or 0)
 
-                # fetch_market_snapshot returns res["body"] — a dict with "Data" key
-                items = raw.get("Data", []) if isinstance(raw, dict) else (
-                    raw if isinstance(raw, list) else []
-                )
+                # Derive change from LTP − PClose when NetChange is absent/zero
+                if change == 0 and close > 0 and ltp_snap > 0:
+                    change = round(ltp_snap - close, 4)
 
-                for item in (items or []):
-                    if not isinstance(item, dict):
-                        continue
-                    sc  = str(item.get("ScripCode") or item.get("Token") or "")
-                    sym = code_to_sym.get(sc)
-                    if not sym:
-                        continue
+                chg_pct = round(change / close * 100, 4) if close else 0.0
 
-                    # Verified field names from live 5paisa MarketSnapshot response:
-                    #   PClose          — previous session close
-                    #   NetChange       — day change (LTP − PClose)
-                    #   LastTradedPrice — current LTP at snapshot call time
-                    close    = _safe_float(item.get("PClose") or 0)
-                    change   = _safe_float(item.get("NetChange") or 0)
-                    ltp_snap = _safe_float(item.get("LastTradedPrice") or 0)
-
-                    # Derive change from LTP − PClose when NetChange is absent/zero
-                    if change == 0 and close > 0 and ltp_snap > 0:
-                        change = round(ltp_snap - close, 4)
-
-                    chg_pct = round(change / close * 100, 4) if close else 0.0
-
-                    result[sym] = {
-                        "close":      close,
-                        "change":     change,
-                        "change_pct": chg_pct,
-                        "ltp":        ltp_snap,   # snapshot LTP — for sync-gap diagnosis
-                    }
+                result[sym] = {
+                    "close":      close,
+                    "change":     change,
+                    "change_pct": chg_pct,
+                    "ltp":        ltp_snap,   # snapshot LTP — for sync-gap diagnosis
+                }
 
             logger.info(
-                "5paisa _fetch_market_snapshot: %d / %d symbols resolved total",
+                "5paisa _fetch_market_snapshot: %d / %d symbols resolved",
                 len(result), len(scrip_info),
             )
             return result
@@ -380,202 +335,6 @@ class FivePaisaAdapter(BrokerAdapter):
         except Exception as exc:
             logger.warning("5paisa _fetch_market_snapshot failed: %s", exc)
             return {}
-
-    def _load_scrip_master(self) -> None:
-        """
-        Download and index the 5paisa scrip master (NSE cash segment only).
-        Lazy-loaded once per process; cached in self._scrip_master.
-
-        Uses the client's own authenticated session and SCRIP_MASTER_ROUTE
-        (https://Openapi.5paisa.com/VendorsAPI/Service1.svc/ScripMaster/segment/All)
-        with an explicit timeout.  Bypasses get_scrips() which swallows errors.
-        """
-        if self._scrip_master or self._scrip_master_failed or not self._client:
-            return
-        try:
-            import csv as csv_module
-            import io
-            import pandas as pd
-
-            url     = self._client.SCRIP_MASTER_ROUTE
-            session = self._client.session
-            logger.info("5paisa _load_scrip_master: fetching %s", url)
-            resp = session.get(url, timeout=60)
-            resp.raise_for_status()
-
-            data    = resp.content.decode("utf-8").strip()
-            reader  = csv_module.DictReader(io.StringIO(data))
-            records = pd.DataFrame(reader)
-
-            logger.info(
-                "5paisa _load_scrip_master: %d rows downloaded, columns=%s",
-                len(records), list(records.columns),
-            )
-
-            if records.empty:
-                logger.warning("5paisa _load_scrip_master: response is empty")
-                return
-
-            # Normalise column names — handle variations across API versions
-            col_map      = {c.strip().lower(): c for c in records.columns}
-            exch_col     = col_map.get("exch") or col_map.get("exchange")
-            exchtype_col = col_map.get("exchtype") or col_map.get("exchangetype")
-            symroot_col  = (col_map.get("symbolroot") or col_map.get("symbol")
-                            or col_map.get("name"))
-            sc_col       = (col_map.get("scripcode") or col_map.get("code")
-                            or col_map.get("token"))
-
-            if not all([exch_col, exchtype_col, symroot_col, sc_col]):
-                logger.warning(
-                    "5paisa _load_scrip_master: expected columns not found — "
-                    "exch=%s exchtype=%s symroot=%s sc=%s | available: %s",
-                    exch_col, exchtype_col, symroot_col, sc_col,
-                    list(records.columns),
-                )
-                return
-
-            nse_cash = records[
-                (records[exch_col] == "N") & (records[exchtype_col] == "C")
-            ]
-            master: Dict[str, str] = {}
-            for _, row in nse_cash.iterrows():
-                sym_root = str(row.get(symroot_col) or "").strip()
-                sc       = str(row.get(sc_col) or "").strip()
-                if sym_root and sc and sym_root not in master:
-                    master[sym_root] = sc
-
-            self._scrip_master = master
-            logger.info(
-                "5paisa _load_scrip_master: %d NSE cash symbols indexed "
-                "(NIFTY=%s BANKNIFTY=%s)",
-                len(master),
-                master.get("NIFTY", "MISSING"),
-                master.get("BANKNIFTY", "MISSING"),
-            )
-        except Exception as exc:
-            self._scrip_master_failed = True
-            logger.warning(
-                "5paisa _load_scrip_master failed (will not retry): %s", exc,
-            )
-
-    def _fetch_prices_by_symbol(self, symbols: List[str]) -> Dict[str, dict]:
-        """
-        Fetch LTP + previous close by NSE symbol name via fetch_market_depth_by_symbol.
-
-        Used as fallback for symbols not in _scrip_cache (e.g. NIFTY, BANKNIFTY,
-        and stock option underlyings not held in the portfolio).
-        Returns {symbol: {"ltp", "close", "change", "change_pct"}}.
-        """
-        if not self._client or not symbols:
-            return {}
-        try:
-            req_list = [
-                {"Exch": "N", "ExchType": "C", "Symbol": sym}
-                for sym in symbols
-            ]
-            logger.info("_fetch_prices_by_symbol: querying %s", symbols)
-            raw = self._client.fetch_market_depth_by_symbol(req_list)
-            if not raw:
-                logger.warning("_fetch_prices_by_symbol: empty response for %s", symbols)
-                return {}
-
-            # Detect API-level errors
-            if isinstance(raw, dict):
-                msg = (raw.get("Message") or raw.get("message") or "").strip()
-                if msg and msg.lower() not in ("", "success"):
-                    logger.warning("_fetch_prices_by_symbol: API error — %r", msg)
-                    return {}
-
-            # Response: body.Data list or direct list
-            items: list = []
-            if isinstance(raw, dict):
-                body  = raw.get("body") or raw
-                items = body.get("Data") or body.get("MarketDepthData") or []
-            elif isinstance(raw, list):
-                items = raw
-
-            if items:
-                logger.info("_fetch_prices_by_symbol: raw keys sample=%s",
-                            list(items[0].keys()))
-            else:
-                logger.warning("_fetch_prices_by_symbol: empty items — raw=%s", raw)
-
-            result: Dict[str, dict] = {}
-            sym_set = set(symbols)
-            for item in (items or []):
-                if not isinstance(item, dict):
-                    continue
-                sym = (item.get("Symbol") or item.get("SymbolRoot") or "").strip()
-                if sym not in sym_set:
-                    continue
-                # /V1/MarketDepth uses "LastRate"; /MarketSnapshot uses "LastTradedPrice"
-                ltp    = _safe_float(item.get("LastRate") or item.get("LastTradedPrice")
-                                     or item.get("LTP") or 0)
-                close  = _safe_float(item.get("PClose") or item.get("Close")
-                                     or item.get("PreviousClose") or 0)
-                change = _safe_float(item.get("NetChange") or item.get("Change") or 0)
-                if change == 0 and close > 0 and ltp > 0:
-                    change = round(ltp - close, 4)
-                chg_pct = round(change / close * 100, 4) if close else 0.0
-                if ltp > 0:
-                    result[sym] = {"ltp": ltp, "close": close,
-                                   "change": change, "change_pct": chg_pct}
-
-            logger.info(
-                "_fetch_prices_by_symbol: resolved %d/%d symbols",
-                len(result), len(symbols),
-            )
-            return result
-        except Exception as exc:
-            logger.warning("_fetch_prices_by_symbol failed: %s", exc, exc_info=True)
-            return {}
-
-    def fetch_quotes_for_symbols(self, symbols: List[str]) -> Dict[str, dict]:
-        """
-        Fetch live quotes for the given symbol list.
-
-        Resolution order per symbol:
-          1. _scrip_cache  — equity holdings (populated by get_holdings each cycle)
-          2. _scrip_master — full NSE cash scrip master (lazy-loaded once; skipped if failed)
-          3. fetch_market_depth_by_symbol — name-based lookup for NIFTY/BANKNIFTY
-             and any stock-option underlyings not present in the portfolio
-
-        Returns {symbol: {"ltp", "close", "change", "change_pct"}}.
-        """
-        if not self._client or not symbols:
-            return {}
-
-        if not self._scrip_master and not self._scrip_master_failed:
-            self._load_scrip_master()
-
-        scrip_info: Dict[str, tuple] = {}
-        name_lookup: List[str] = []
-        for sym in symbols:
-            if sym in self._scrip_cache:
-                scrip_info[sym] = self._scrip_cache[sym]
-            elif sym in self._scrip_master:
-                sc = self._scrip_master[sym]
-                scrip_info[sym] = ("N", sc)
-                self._scrip_cache[sym] = ("N", sc)
-            else:
-                name_lookup.append(sym)
-
-        logger.info(
-            "fetch_quotes_for_symbols: requested=%d  scrip_cache=%d  name_lookup=%d",
-            len(symbols), len(scrip_info), len(name_lookup),
-        )
-
-        result: Dict[str, dict] = {}
-        if scrip_info:
-            result.update(self._fetch_market_snapshot(scrip_info))
-        if name_lookup:
-            result.update(self._fetch_prices_by_symbol(name_lookup))
-
-        logger.info(
-            "fetch_quotes_for_symbols: total returned=%d/%d",
-            len(result), len(symbols),
-        )
-        return result
 
     def get_holdings(self, account_id: str) -> List[Holding]:
         if not self.is_session_valid(account_id):
@@ -647,7 +406,6 @@ class FivePaisaAdapter(BrokerAdapter):
 
         if scrip_info:
             logger.info("5paisa holdings: snapshot request for %d symbols", len(scrip_info))
-            self._scrip_cache.update(scrip_info)   # warm cache for fetch_quotes_for_symbols
         else:
             logger.warning(
                 "5paisa holdings: NseCode/BseCode absent from payload — "
