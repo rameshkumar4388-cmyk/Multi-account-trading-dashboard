@@ -184,18 +184,25 @@ def _render_underlying_section(positions, active_cfgs: dict, md_service=None):
         if seen_underlyings:
             chips_html = ""
             for sym in seen_underlyings:
-                ltp   = (md_service.get_ltp(sym) or 0.0) if md_service else 0.0
-                chg   = (md_service.get_change(sym) or 0.0) if md_service else 0.0
-                color = C["positive"] if chg >= 0 else C["negative"]
-                ltp_s = f"{ltp:,.0f}" if ltp > 0 else "—"
+                ltp     = (md_service.get_ltp(sym)        or 0.0) if md_service else 0.0
+                chg     = (md_service.get_change(sym)     or 0.0) if md_service else 0.0
+                chg_pct = (md_service.get_change_pct(sym) or 0.0) if md_service else 0.0
+                color   = C["positive"] if chg >= 0 else C["negative"]
+                arrow   = "&#9650;" if chg >= 0 else "&#9660;"
+                sign    = "+" if chg >= 0 else ""
+                ltp_s   = f"{ltp:,.2f}" if ltp > 0 else "—"
+                chg_s   = f"{sign}{chg:,.2f} ({sign}{chg_pct:.2f}%)" if ltp > 0 else "—"
                 chips_html += (
                     f"<div style='display:inline-flex;flex-direction:column;"
                     f"background:rgba(45,49,112,0.18);border:1px solid {C['border_glow']};"
-                    f"border-radius:6px;padding:5px 9px;margin:2px 3px 2px 0;min-width:58px;'>"
+                    f"border-radius:6px;padding:6px 10px;margin:2px 3px 2px 0;min-width:80px;'>"
                     f"<span style='font-size:0.6rem;font-weight:700;color:#a78bfa;"
-                    f"letter-spacing:0.04em;'>{sym}</span>"
-                    f"<span style='font-size:0.65rem;font-weight:600;color:{color};"
-                    f"font-family:\"JetBrains Mono\",monospace;'>{ltp_s}</span>"
+                    f"letter-spacing:0.04em;margin-bottom:2px;'>{sym}</span>"
+                    f"<span style='font-size:0.72rem;font-weight:700;color:{C['text_1']};"
+                    f"font-family:\"JetBrains Mono\",monospace;line-height:1.2;'>{ltp_s}</span>"
+                    f"<span style='font-size:0.58rem;font-weight:600;color:{color};"
+                    f"font-family:\"JetBrains Mono\",monospace;margin-top:2px;'>"
+                    f"{arrow} {chg_s}</span>"
                     f"</div>"
                 )
         else:

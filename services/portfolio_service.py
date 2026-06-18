@@ -32,7 +32,7 @@ class PortfolioService:
         self._positions_cache: Dict[str, tuple] = {}
         self._margin_cache:    Dict[str, tuple] = {}
 
-        self._ttl = 30.0  # seconds before re-fetching from broker
+        self._ttl = 5.0  # seconds before re-fetching from broker
 
     # ------------------------------------------------------------------
     # Cache helpers
